@@ -31,6 +31,7 @@ import (
 	backuppb "github.com/pingcap/kvproto/pkg/brpb"
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/br/pkg/backup"
+	"github.com/pingcap/tidb/br/pkg/checkpoint"
 	"github.com/pingcap/tidb/br/pkg/conn"
 	berrors "github.com/pingcap/tidb/br/pkg/errors"
 	"github.com/pingcap/tidb/br/pkg/glue"
@@ -46,6 +47,7 @@ import (
 	"github.com/pingcap/tidb/br/pkg/streamhelper/daemon"
 	"github.com/pingcap/tidb/br/pkg/summary"
 	"github.com/pingcap/tidb/br/pkg/utils"
+	"github.com/pingcap/tidb/br/pkg/utils/iter"
 	"github.com/pingcap/tidb/ddl"
 	"github.com/pingcap/tidb/kv"
 	"github.com/pingcap/tidb/parser/model"
@@ -1298,7 +1300,26 @@ func restoreStream(
 	if err != nil {
 		return errors.Trace(err)
 	}
-	logFilesIterWithSplit, err := client.WrapLogFilesIterWithSplitHelper(logFilesIter, rewriteRules, g, mgr.GetStorage())
+
+	skipmap, err := client.GetSkipMap(ctx)
+	if err != nil {
+		return errors.Trace(err)
+	}
+
+	logFilesIterWithCheckpoint := iter.FilterOut(logFilesIter, func(d *checkpoint.LogDataFileInfo) bool {
+		metamap, exists := skipmap[d.MetaDataGroupName]
+		if !exists {
+			return false
+		}
+		groupmap, exists := metamap[d.OffsetInMetaGroup]
+		if !exists {
+			return false
+		}
+		_, exists = groupmap[d.OffsetInMergedGroup]
+		return exists
+	})
+
+	logFilesIterWithSplit, err := client.WrapLogFilesIterWithSplitHelper(logFilesIterWithCheckpoint, rewriteRules, g, mgr.GetStorage())
 	if err != nil {
 		return errors.Trace(err)
 	}

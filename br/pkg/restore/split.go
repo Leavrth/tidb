@@ -17,6 +17,7 @@ import (
 	sst "github.com/pingcap/kvproto/pkg/import_sstpb"
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
+	"github.com/pingcap/tidb/br/pkg/checkpoint"
 	berrors "github.com/pingcap/tidb/br/pkg/errors"
 	"github.com/pingcap/tidb/br/pkg/logutil"
 	"github.com/pingcap/tidb/br/pkg/restore/split"
@@ -812,7 +813,7 @@ func (helper *LogSplitHelper) Split(ctx context.Context) error {
 type LogFilesIterWithSplitHelper struct {
 	iter   LogIter
 	helper *LogSplitHelper
-	buffer []*backuppb.DataFileInfo
+	buffer []*checkpoint.LogDataFileInfo
 	next   int
 }
 
@@ -827,15 +828,15 @@ func NewLogFilesIterWithSplitHelper(iter LogIter, rules map[int64]*RewriteRules,
 	}
 }
 
-func (splitIter *LogFilesIterWithSplitHelper) TryNext(ctx context.Context) iter.IterResult[*backuppb.DataFileInfo] {
+func (splitIter *LogFilesIterWithSplitHelper) TryNext(ctx context.Context) iter.IterResult[*checkpoint.LogDataFileInfo] {
 	if splitIter.next >= len(splitIter.buffer) {
-		splitIter.buffer = make([]*backuppb.DataFileInfo, 0, SplitFilesBufferSize)
+		splitIter.buffer = make([]*checkpoint.LogDataFileInfo, 0, SplitFilesBufferSize)
 		for r := splitIter.iter.TryNext(ctx); !r.Finished; r = splitIter.iter.TryNext(ctx) {
 			if r.Err != nil {
 				return r
 			}
 			f := r.Item
-			splitIter.helper.Merge(f)
+			splitIter.helper.Merge(f.DataFileInfo)
 			splitIter.buffer = append(splitIter.buffer, f)
 			if len(splitIter.buffer) >= SplitFilesBufferSize {
 				break
@@ -843,12 +844,12 @@ func (splitIter *LogFilesIterWithSplitHelper) TryNext(ctx context.Context) iter.
 		}
 		splitIter.next = 0
 		if len(splitIter.buffer) == 0 {
-			return iter.Done[*backuppb.DataFileInfo]()
+			return iter.Done[*checkpoint.LogDataFileInfo]()
 		}
 		log.Info("start to split the regions")
 		startTime := time.Now()
 		if err := splitIter.helper.Split(ctx); err != nil {
-			return iter.Throw[*backuppb.DataFileInfo](errors.Trace(err))
+			return iter.Throw[*checkpoint.LogDataFileInfo](errors.Trace(err))
 		}
 		log.Info("end to split the regions", zap.Duration("takes", time.Since(startTime)))
 	}

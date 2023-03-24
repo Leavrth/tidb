@@ -21,6 +21,7 @@ import (
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/log"
+	"github.com/pingcap/tidb/br/pkg/checkpoint"
 	"github.com/pingcap/tidb/br/pkg/conn"
 	"github.com/pingcap/tidb/br/pkg/conn/util"
 	berrors "github.com/pingcap/tidb/br/pkg/errors"
@@ -354,7 +355,7 @@ func (importer *FileImporter) getKeyRangeForFiles(
 // Import tries to import a file.
 func (importer *FileImporter) ImportKVFileForRegion(
 	ctx context.Context,
-	files []*backuppb.DataFileInfo,
+	files []*checkpoint.LogDataFileInfo,
 	rule *RewriteRules,
 	shiftStartTS uint64,
 	startTS uint64,
@@ -405,17 +406,17 @@ func (importer *FileImporter) ClearFiles(ctx context.Context, pdClient pd.Client
 }
 
 func FilterFilesByRegion(
-	files []*backuppb.DataFileInfo,
+	files []*checkpoint.LogDataFileInfo,
 	ranges []kv.KeyRange,
 	r *split.RegionInfo,
-) ([]*backuppb.DataFileInfo, error) {
+) ([]*checkpoint.LogDataFileInfo, error) {
 	if len(files) != len(ranges) {
 		return nil, errors.Annotatef(berrors.ErrInvalidArgument,
 			"count of files no equals count of ranges, file-count:%v, ranges-count:%v",
 			len(files), len(ranges))
 	}
 
-	output := make([]*backuppb.DataFileInfo, 0, len(files))
+	output := make([]*checkpoint.LogDataFileInfo, 0, len(files))
 	if r != nil && r.Region != nil {
 		for i, f := range files {
 			if bytes.Compare(r.Region.StartKey, ranges[i].EndKey) <= 0 &&
@@ -433,7 +434,7 @@ func FilterFilesByRegion(
 // ImportKVFiles restores the kv events.
 func (importer *FileImporter) ImportKVFiles(
 	ctx context.Context,
-	files []*backuppb.DataFileInfo,
+	files []*checkpoint.LogDataFileInfo,
 	rule *RewriteRules,
 	shiftStartTS uint64,
 	startTS uint64,
@@ -894,7 +895,7 @@ func (importer *FileImporter) ingestSSTs(
 
 func (importer *FileImporter) downloadAndApplyKVFile(
 	ctx context.Context,
-	files []*backuppb.DataFileInfo,
+	files []*checkpoint.LogDataFileInfo,
 	rules *RewriteRules,
 	regionInfo *split.RegionInfo,
 	shiftStartTS uint64,

@@ -12,6 +12,7 @@ import (
 	"github.com/pingcap/errors"
 	backuppb "github.com/pingcap/kvproto/pkg/brpb"
 	"github.com/pingcap/log"
+	"github.com/pingcap/tidb/br/pkg/checkpoint"
 	berrors "github.com/pingcap/tidb/br/pkg/errors"
 	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/br/pkg/stream"
@@ -29,7 +30,7 @@ const (
 type MetaIter = iter.TryNextor[*backuppb.Metadata]
 
 // LogIter is the type of iterator of each log files' meta information.
-type LogIter = iter.TryNextor[*backuppb.DataFileInfo]
+type LogIter = iter.TryNextor[*checkpoint.LogDataFileInfo]
 
 // MetaGroupIter is the iterator of flushes of metadata.
 type MetaGroupIter = iter.TryNextor[DDLMetaGroup]
@@ -172,13 +173,21 @@ func (rc *logFileManager) createMetaIterOver(ctx context.Context, s storage.Exte
 
 func (rc *logFileManager) FilterDataFiles(ms MetaIter) LogIter {
 	return iter.FlatMap(ms, func(m *backuppb.Metadata) LogIter {
-		return iter.FlatMap(iter.FromSlice(m.FileGroups), func(g *backuppb.DataFileGroup) LogIter {
-			return iter.FilterOut(iter.FromSlice(g.DataFilesInfo), func(d *backuppb.DataFileInfo) bool {
+		return iter.FlatMapWithOffset(iter.FromArray(m.FileGroups), func(goff int, g *backuppb.DataFileGroup) LogIter {
+			return iter.FilterOut(iter.MapWithOffset(iter.FromArray(g.DataFilesInfo), func(foff int, g *backuppb.DataFileInfo) *checkpoint.LogDataFileInfo {
+				return &checkpoint.LogDataFileInfo{
+					DataFileInfo:        g,
+					MetaDataGroupName:   m.FileGroups[0].Path,
+					OffsetInMetaGroup:   goff,
+					OffsetInMergedGroup: foff,
+				}
+			}), func(d *checkpoint.LogDataFileInfo) bool {
 				// Modify the data internally, a little hacky.
 				if m.MetaVersion > backuppb.MetaVersion_V1 {
 					d.Path = g.Path
 				}
-				return d.IsMeta || rc.ShouldFilterOut(d)
+
+				return d.IsMeta || rc.ShouldFilterOut(d.DataFileInfo)
 			})
 		})
 	})

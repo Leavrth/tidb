@@ -95,10 +95,32 @@ type join[T any] struct {
 	current TryNextor[T]
 }
 
+type joinWithOffset[T any] struct {
+	inner TryNextor[TryNextor[T]]
+
+	current TryNextor[T]
+}
+
 type pureMap[T, R any] struct {
 	inner TryNextor[T]
 
 	mapper func(T) R
+}
+
+type pureMapWithOffset[T, R any] struct {
+	inner TryNextorWithOffset[T]
+
+	mapper func(int, T) R
+}
+
+func (p pureMapWithOffset[T, R]) TryNext(ctx context.Context) IterResult[R] {
+	off, r := p.inner.TryNextWithOffset(ctx)
+
+	if r.FinishedOrError() {
+		return DoneBy[R](r)
+	}
+
+	return Emit(p.mapper(off, r.Item))
 }
 
 func (p pureMap[T, R]) TryNext(ctx context.Context) IterResult[R] {

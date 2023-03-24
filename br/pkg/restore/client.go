@@ -23,6 +23,7 @@ import (
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/br/pkg/backup"
+	"github.com/pingcap/tidb/br/pkg/checkpoint"
 	"github.com/pingcap/tidb/br/pkg/checksum"
 	"github.com/pingcap/tidb/br/pkg/conn/util"
 	berrors "github.com/pingcap/tidb/br/pkg/errors"
@@ -1152,6 +1153,24 @@ func (rc *Client) WrapLogFilesIterWithSplitHelper(iter LogIter, rules map[int64]
 	return NewLogFilesIterWithSplitHelper(iter, rules, client, splitSize, splitKeys), nil
 }
 
+func (rc *Client) GetSkipMap(ctx context.Context) (map[string]map[int]map[int]struct{}, error) {
+	skipMap := make(map[string]map[int]map[int]struct{})
+	_, err := checkpoint.WalkCheckpointFileForLogRestore(ctx, rc.storage, rc.cipher, func(groupKey string, rg *checkpoint.LogGroupValue) {
+		m, exists := skipMap[groupKey]
+		if !exists {
+			m = make(map[int]map[int]struct{})
+			skipMap[groupKey] = m
+		}
+		g, exists := m[rg.Goff]
+		if !exists {
+			g = make(map[int]struct{})
+			m[rg.Goff] = g
+		}
+		g[rg.Foff] = struct{}{}
+	})
+	return skipMap, err
+}
+
 // RestoreSSTFiles tries to restore the files.
 func (rc *Client) RestoreSSTFiles(
 	ctx context.Context,
@@ -1886,9 +1905,9 @@ type FilesInRegion struct {
 	writeSize      uint64
 	writeKVCount   int64
 
-	defaultFiles []*backuppb.DataFileInfo
-	writeFiles   []*backuppb.DataFileInfo
-	deleteFiles  []*backuppb.DataFileInfo
+	defaultFiles []*checkpoint.LogDataFileInfo
+	writeFiles   []*checkpoint.LogDataFileInfo
+	deleteFiles  []*checkpoint.LogDataFileInfo
 }
 
 type FilesInTable struct {
@@ -1900,11 +1919,11 @@ func ApplyKVFilesWithBatchMethod(
 	iter LogIter,
 	batchCount int,
 	batchSize uint64,
-	applyFunc func(files []*backuppb.DataFileInfo, kvCount int64, size uint64),
+	applyFunc func(files []*checkpoint.LogDataFileInfo, kvCount int64, size uint64),
 ) error {
 	var (
 		tableMapFiles        = make(map[int64]*FilesInTable)
-		tmpFiles             = make([]*backuppb.DataFileInfo, 0, batchCount)
+		tmpFiles             = make([]*checkpoint.LogDataFileInfo, 0, batchCount)
 		tmpSize       uint64 = 0
 		tmpKVCount    int64  = 0
 	)
@@ -1915,7 +1934,7 @@ func ApplyKVFilesWithBatchMethod(
 
 		f := r.Item
 		if f.GetType() == backuppb.FileType_Put && f.GetLength() >= batchSize {
-			applyFunc([]*backuppb.DataFileInfo{f}, f.GetNumberOfEntries(), f.GetLength())
+			applyFunc([]*checkpoint.LogDataFileInfo{f}, f.GetNumberOfEntries(), f.GetLength())
 			continue
 		}
 
@@ -1934,13 +1953,13 @@ func ApplyKVFilesWithBatchMethod(
 
 		if f.GetType() == backuppb.FileType_Delete {
 			if fs.defaultFiles == nil {
-				fs.deleteFiles = make([]*backuppb.DataFileInfo, 0)
+				fs.deleteFiles = make([]*checkpoint.LogDataFileInfo, 0)
 			}
 			fs.deleteFiles = append(fs.deleteFiles, f)
 		} else {
 			if f.GetCf() == stream.DefaultCF {
 				if fs.defaultFiles == nil {
-					fs.defaultFiles = make([]*backuppb.DataFileInfo, 0, batchCount)
+					fs.defaultFiles = make([]*checkpoint.LogDataFileInfo, 0, batchCount)
 				}
 				fs.defaultFiles = append(fs.defaultFiles, f)
 				fs.defaultSize += f.Length
@@ -1953,7 +1972,7 @@ func ApplyKVFilesWithBatchMethod(
 				}
 			} else {
 				if fs.writeFiles == nil {
-					fs.writeFiles = make([]*backuppb.DataFileInfo, 0, batchCount)
+					fs.writeFiles = make([]*checkpoint.LogDataFileInfo, 0, batchCount)
 				}
 				fs.writeFiles = append(fs.writeFiles, f)
 				fs.writeSize += f.GetLength()
@@ -1988,14 +2007,14 @@ func ApplyKVFilesWithBatchMethod(
 
 				if len(tmpFiles) >= batchCount || tmpSize >= batchSize {
 					applyFunc(tmpFiles, tmpKVCount, tmpSize)
-					tmpFiles = make([]*backuppb.DataFileInfo, 0, batchCount)
+					tmpFiles = make([]*checkpoint.LogDataFileInfo, 0, batchCount)
 					tmpSize = 0
 					tmpKVCount = 0
 				}
 			}
 			if len(tmpFiles) > 0 {
 				applyFunc(tmpFiles, tmpKVCount, tmpSize)
-				tmpFiles = make([]*backuppb.DataFileInfo, 0, batchCount)
+				tmpFiles = make([]*checkpoint.LogDataFileInfo, 0, batchCount)
 				tmpSize = 0
 				tmpKVCount = 0
 			}
@@ -2008,9 +2027,9 @@ func ApplyKVFilesWithBatchMethod(
 func ApplyKVFilesWithSingelMethod(
 	ctx context.Context,
 	files LogIter,
-	applyFunc func(file []*backuppb.DataFileInfo, kvCount int64, size uint64),
+	applyFunc func(file []*checkpoint.LogDataFileInfo, kvCount int64, size uint64),
 ) error {
-	deleteKVFiles := make([]*backuppb.DataFileInfo, 0)
+	deleteKVFiles := make([]*checkpoint.LogDataFileInfo, 0)
 
 	for r := files.TryNext(ctx); !r.Finished; r = files.TryNext(ctx) {
 		if r.Err != nil {
@@ -2022,13 +2041,13 @@ func ApplyKVFilesWithSingelMethod(
 			deleteKVFiles = append(deleteKVFiles, f)
 			continue
 		}
-		applyFunc([]*backuppb.DataFileInfo{f}, f.GetNumberOfEntries(), f.GetLength())
+		applyFunc([]*checkpoint.LogDataFileInfo{f}, f.GetNumberOfEntries(), f.GetLength())
 	}
 
 	log.Info("restore delete files", zap.Int("count", len(deleteKVFiles)))
 	for _, file := range deleteKVFiles {
 		f := file
-		applyFunc([]*backuppb.DataFileInfo{f}, f.GetNumberOfEntries(), f.GetLength())
+		applyFunc([]*checkpoint.LogDataFileInfo{f}, f.GetNumberOfEntries(), f.GetLength())
 	}
 
 	return nil
@@ -2064,8 +2083,14 @@ func (rc *Client) RestoreKVFiles(
 		ctx = opentracing.ContextWithSpan(ctx, span1)
 	}
 
+	runner, err := checkpoint.StartLogCheckpointRunner(ctx, rc.storage, rc.cipher)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	defer runner.WaitForFinish(ctx)
+
 	eg, ectx := errgroup.WithContext(ctx)
-	applyFunc := func(files []*backuppb.DataFileInfo, kvCount int64, size uint64) {
+	applyFunc := func(files []*checkpoint.LogDataFileInfo, kvCount int64, size uint64) {
 		if len(files) == 0 {
 			return
 		}
@@ -2093,6 +2118,7 @@ func (rc *Client) RestoreKVFiles(
 						filenames := make([]string, 0, len(files))
 						for _, f := range files {
 							filenames = append(filenames, f.Path+", ")
+							err = runner.Append(ectx, f.MetaDataGroupName, f.OffsetInMetaGroup, f.OffsetInMergedGroup)
 						}
 						log.Info("import files done", zap.Int("batch-count", len(files)), zap.Uint64("batch-size", size),
 							zap.Duration("take", time.Since(fileStart)), zap.Strings("files", filenames))

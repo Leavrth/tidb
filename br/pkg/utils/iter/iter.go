@@ -32,6 +32,10 @@ type TryNextor[T any] interface {
 	TryNext(ctx context.Context) IterResult[T]
 }
 
+type TryNextorWithOffset[T any] interface {
+	TryNextWithOffset(ctx context.Context) (int, IterResult[T])
+}
+
 func (r IterResult[T]) FinishedOrError() bool {
 	return r.Err != nil || r.Finished
 }

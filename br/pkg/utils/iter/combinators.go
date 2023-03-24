@@ -76,9 +76,26 @@ func FlatMap[T, R any](it TryNextor[T], mapper func(T) TryNextor[R]) TryNextor[R
 	}
 }
 
+func FlatMapWithOffset[T, R any](it TryNextorWithOffset[T], mapper func(int, T) TryNextor[R]) TryNextor[R] {
+	return &join[R]{
+		inner: pureMapWithOffset[T, TryNextor[R]]{
+			inner:  it,
+			mapper: mapper,
+		},
+		current: empty[R]{},
+	}
+}
+
 // Map applies the mapper over every elements the origin iterator yields.
 func Map[T, R any](it TryNextor[T], mapper func(T) R) TryNextor[R] {
 	return pureMap[T, R]{
+		inner:  it,
+		mapper: mapper,
+	}
+}
+
+func MapWithOffset[T, R any](it TryNextorWithOffset[T], mapper func(int, T) R) TryNextor[R] {
+	return pureMapWithOffset[T, R]{
 		inner:  it,
 		mapper: mapper,
 	}
