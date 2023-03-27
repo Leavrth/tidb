@@ -1305,26 +1305,31 @@ func restoreStream(
 	if err != nil {
 		return errors.Trace(err)
 	}
-
-	logFilesIterWithCheckpoint := iter.FilterOut(logFilesIter, func(d *checkpoint.LogDataFileInfo) bool {
-		metamap, exists := skipmap[d.MetaDataGroupName]
-		if !exists {
-			return false
-		}
-		groupmap, exists := metamap[d.OffsetInMetaGroup]
-		if !exists {
-			return false
-		}
-		_, exists = groupmap[d.OffsetInMergedGroup]
-		return exists
-	})
-
-	logFilesIterWithSplit, err := client.WrapLogFilesIterWithSplitHelper(logFilesIterWithCheckpoint, rewriteRules, g, mgr.GetStorage())
-	if err != nil {
-		return errors.Trace(err)
-	}
 	pd := g.StartProgress(ctx, "Restore KV Files", int64(dataFileCount), !cfg.LogProgress)
 	err = withProgress(pd, func(p glue.Progress) error {
+		logFilesIterWithCheckpoint := iter.FilterOut(logFilesIter, func(d *checkpoint.LogDataFileInfo) bool {
+			metamap, exists := skipmap[d.MetaDataGroupName]
+			if !exists {
+				return false
+			}
+			groupmap, exists := metamap[d.OffsetInMetaGroup]
+			if !exists {
+				return false
+			}
+			_, exists = groupmap[d.OffsetInMergedGroup]
+			if !exists {
+				return false
+			}
+			p.Inc()
+			updateStats(uint64(d.NumberOfEntries), d.Length)
+			return true
+		})
+
+		logFilesIterWithSplit, err := client.WrapLogFilesIterWithSplitHelper(logFilesIterWithCheckpoint, rewriteRules, g, mgr.GetStorage())
+		if err != nil {
+			return errors.Trace(err)
+		}
+
 		return client.RestoreKVFiles(ctx, rewriteRules, logFilesIterWithSplit, cfg.PitrBatchCount, cfg.PitrBatchSize, updateStats, p.IncBy)
 	})
 	if err != nil {
