@@ -326,3 +326,43 @@ func WalkCheckpointFileForLogRestore(ctx context.Context, s storage.ExternalStor
 
 	return pastDureTime, errors.Trace(err)
 }
+
+type bitMap []uint8
+
+func newBitMap(size int) bitMap {
+	size = (size + 7) / 8
+	return make([]uint8, size)
+}
+
+func (m bitMap) Set(off uint64) {
+	blockIndex := off >> 3
+	bitOffset := uint8(1) << (off & 7)
+	m[blockIndex] |= bitOffset
+}
+
+func (m bitMap) Hit(off uint64) bool {
+	blockIndex := off >> 3
+	bitOffset := uint8(1) << (off & 7)
+	return (m[blockIndex] & bitOffset) > 0
+}
+
+type fileOnceMap struct {
+	done  int
+	total int
+	pos   []bitMap
+}
+
+type LogFilesSkipMap struct {
+	skipMap map[string]*fileOnceMap
+}
+
+func (m *LogFilesSkipMap) needSkip(metaKey string, groupOff int, fileOff uint64) bool {
+	mp, exists := m.skipMap[metaKey]
+	if !exists {
+		return false
+	}
+	if mp.done == mp.total {
+		return true
+	}
+	return mp.pos[groupOff].Hit(fileOff)
+}
