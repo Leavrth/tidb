@@ -196,6 +196,8 @@ type RestoreConfig struct {
 	PitrBatchSize   uint32                      `json:"pitr-batch-size" toml:"pitr-batch-size"`
 	PitrConcurrency uint32                      `json:"-" toml:"-"`
 
+	UseCheckpoint bool `json:"use-checkpoint" toml:"use-checkpoint"`
+
 	// for ebs-based restore
 	FullBackupType      FullBackupType        `json:"full-backup-type" toml:"full-backup-type"`
 	Prepare             bool                  `json:"prepare" toml:"prepare"`
@@ -215,6 +217,9 @@ func DefineRestoreFlags(flags *pflag.FlagSet) {
 	_ = flags.MarkHidden(flagNoSchema)
 	flags.String(FlagWithPlacementPolicy, "STRICT", "correspond to tidb global/session variable with-tidb-placement-mode")
 	flags.String(FlagKeyspaceName, "", "correspond to tidb config keyspace-name")
+
+	flags.Bool(flagUseCheckpoint, true, "use checkpoint mode")
+	_ = flags.MarkHidden(flagUseCheckpoint)
 
 	DefineRestoreCommonFlags(flags)
 }
@@ -312,6 +317,10 @@ func (cfg *RestoreConfig) ParseFromFlags(flags *pflag.FlagSet) error {
 	cfg.KeyspaceName, err = flags.GetString(FlagKeyspaceName)
 	if err != nil {
 		return errors.Annotatef(err, "failed to get flag %s", FlagKeyspaceName)
+	}
+	cfg.UseCheckpoint, err = flags.GetBool(flagUseCheckpoint)
+	if err != nil {
+		return errors.Annotatef(err, "failed to get flag %s", flagUseCheckpoint)
 	}
 
 	if flags.Lookup(flagFullBackupType) != nil {
@@ -633,18 +642,61 @@ func runRestore(c context.Context, g glue.Glue, cmdName string, cfg *RestoreConf
 		}
 	}
 
+	if client.IsIncremental() {
+		// don't support checkpoint for the ddl restore
+		cfg.UseCheckpoint = false
+	}
+	tree, gcID, err := client.InitCheckpoint(ctx, s, &restoreTS, cfg.UseCheckpoint)
+	if err != nil {
+		return errors.Trace(err)
+	}
+
+	var gcTTL int64 = utils.DefaultBRGCSafePointTTL
+	if cfg.UseCheckpoint {
+		gcTTL = utils.DefaultCheckpointGCSafePointTTL
+	}
 	sp := utils.BRServiceSafePoint{
 		BackupTS: restoreTS,
-		TTL:      utils.DefaultBRGCSafePointTTL,
-		ID:       utils.MakeSafePointID(),
+		TTL:      gcTTL,
+		ID:       gcID,
 	}
 	g.Record("BackupTS", backupMeta.EndVersion)
 	g.Record("RestoreTS", restoreTS)
 
+	restoreSchedulers, err := restorePreWork(ctx, client, mgr, true)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	cctx, gcSafePointKeeperCancel := context.WithCancel(ctx)
+	gcSafePointKeeperRemovable := false
+	defer func() {
+		// don't reset the gc-safe-point and pd scheduler if checkpoint mode is used and restored is not finished
+		if cfg.UseCheckpoint && !gcSafePointKeeperRemovable {
+			log.Info("skip removing gc-safepoint keeper and pd schehduler for next retry", zap.String("gc-id", sp.ID))
+			log.Info("wait for flush checkpoint...")
+			client.WaitForFinishCheckpoint(ctx)
+			return
+		}
+		log.Info("start to remove the pd scheduler")
+		// run the post-work to avoid being stuck in the import
+		// mode or emptied schedulers.
+		restorePostWork(ctx, client, restoreSchedulers)
+		log.Info("start to remove gc-safepoint keeper")
+		// close the gc safe point keeper at first
+		gcSafePointKeeperCancel()
+		// set the ttl to 0 to remove the gc-safe-point
+		sp.TTL = 0
+		if err := utils.UpdateServiceSafePoint(ctx, mgr.GetPDClient(), sp); err != nil {
+			log.Warn("failed to update service safe point, backup may fail if gc triggered",
+				zap.Error(err),
+			)
+		}
+		log.Info("finish removing gc-safepoint keeper and pd scheduler")
+	}()
 	// restore checksum will check safe point with its start ts, see details at
 	// https://github.com/pingcap/tidb/blob/180c02127105bed73712050594da6ead4d70a85f/store/tikv/kv.go#L186-L190
 	// so, we should keep the safe point unchangeable. to avoid GC life time is shorter than transaction duration.
-	err = utils.StartServiceSafePointKeeper(ctx, mgr.GetPDClient(), sp)
+	err = utils.StartServiceSafePointKeeper(cctx, mgr.GetPDClient(), sp)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -763,14 +815,6 @@ func runRestore(c context.Context, g glue.Glue, cmdName string, cfg *RestoreConf
 	summary.CollectInt("restore ranges", rangeSize)
 	log.Info("range and file prepared", zap.Int("file count", len(files)), zap.Int("range count", rangeSize))
 
-	restoreSchedulers, err := restorePreWork(ctx, client, mgr, true)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	// Always run the post-work even on error, so we don't stuck in the import
-	// mode or emptied schedulers
-	defer restorePostWork(ctx, client, restoreSchedulers)
-
 	// Do not reset timestamp if we are doing incremental restore, because
 	// we are not allowed to decrease timestamp.
 	if !client.IsIncremental() {
@@ -795,12 +839,13 @@ func runRestore(c context.Context, g glue.Glue, cmdName string, cfg *RestoreConf
 		int64(rangeSize+len(files)+len(tables)),
 		!cfg.LogProgress)
 	defer updateCh.Close()
-	sender, err := restore.NewTiKVSender(ctx, client, updateCh, cfg.PDConcurrency)
+	sender, err := restore.NewTiKVSender(ctx, client, updateCh, cfg.PDConcurrency, client.GetCheckpointRunner())
 	if err != nil {
 		return errors.Trace(err)
 	}
 	manager := restore.NewBRContextManager(client)
-	batcher, afterRestoreStream := restore.NewBatcher(ctx, sender, manager, errCh)
+	batcher, afterRestoreStream := restore.NewBatcher(ctx, sender, manager, errCh, updateCh)
+	batcher.SetCheckpoint(tree)
 	batcher.SetThreshold(batchSize)
 	batcher.EnableAutoCommit(ctx, cfg.BatchFlushInterval)
 	go restoreTableStream(ctx, rangeStream, batcher, errCh)
@@ -848,6 +893,8 @@ func runRestore(c context.Context, g glue.Glue, cmdName string, cfg *RestoreConf
 	// The cost of rename user table / replace into system table wouldn't be so high.
 	// So leave it out of the pipeline for easier implementation.
 	client.RestoreSystemSchemas(ctx, cfg.TableFilter)
+
+	gcSafePointKeeperRemovable = true
 
 	// Set task summary to success status.
 	summary.SetSuccessStatus(true)

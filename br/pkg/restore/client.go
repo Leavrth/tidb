@@ -23,6 +23,7 @@ import (
 	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/br/pkg/backup"
+	"github.com/pingcap/tidb/br/pkg/checkpoint"
 	"github.com/pingcap/tidb/br/pkg/checksum"
 	"github.com/pingcap/tidb/br/pkg/conn/util"
 	berrors "github.com/pingcap/tidb/br/pkg/errors"
@@ -173,6 +174,10 @@ type Client struct {
 
 	// the rewrite mode of the downloaded SST files in TiKV.
 	rewriteMode RewriteMode
+
+	// checkpoint information
+	checkpointRunner   *checkpoint.RestoreRunner
+	checkpointChecksum map[int64]*checkpoint.ChecksumItem
 }
 
 // NewRestoreClient returns a new RestoreClient.
@@ -235,6 +240,90 @@ func (rc *Client) Init(g glue.Glue, store kv.Storage) error {
 		}
 	}
 	return errors.Trace(err)
+}
+
+// InitCheckpoint initialize the checkpoint status for the cluster. If the cluster is
+// restored for the first time, it will initialize the checkpoint metadata. Otherwrise,
+// it will load checkpoint metadata and checkpoint ranges/checksum from the external
+// storage.
+func (rc *Client) InitCheckpoint(ctx context.Context, s storage.ExternalStorage, restoreTS *uint64, useCheckpoint bool) (map[int64]rtree.RangeTree, string, error) {
+	var (
+		taskName = fmt.Sprintf("%d", rc.GetPDClient().GetClusterID(ctx))
+		// id is the gc-safepoint id, the same restore task's id should be the same.
+		id = utils.MakeSafePointID()
+		// checkpoint ranges
+		tree = make(map[int64]rtree.RangeTree)
+
+		meta *checkpoint.CheckpointMetadata
+	)
+
+	// if not use checkpoint, return empty checkpoint ranges and new gc-safepoint id
+	if !useCheckpoint {
+		return tree, id, nil
+	}
+
+	// if the checkpoint metadata exists in the external storage, the restore is not
+	// for the first time.
+	exists, err := checkpoint.ExistsRestoreCheckpoint(ctx, s, taskName)
+	if err != nil {
+		return tree, id, errors.Trace(err)
+	}
+
+	if exists {
+		// load the checkpoint since this is not the first time to restore
+		meta, err = checkpoint.LoadCheckpointMetaForRestore(ctx, s, taskName)
+		if err != nil {
+			return tree, id, errors.Trace(err)
+		}
+		id = meta.GCServiceId
+		*restoreTS = meta.BackupTS
+
+		// t1 is the latest time the checkpoint ranges persisted to the external storage.
+		t1, err := checkpoint.WalkCheckpointFileForRestore(ctx, s, rc.cipher, taskName, func(tableID int64, rg *rtree.Range) {
+			t, exists := tree[tableID]
+			if !exists {
+				t = rtree.NewRangeTree()
+				tree[tableID] = t
+			}
+			t.InsertRange(*rg)
+		})
+		if err != nil {
+			return tree, id, errors.Trace(err)
+		}
+		// t2 is the latest time the checkpoint checksum persisted to the external storage.
+		checkpointChecksum, t2, err := checkpoint.LoadCheckpointChecksumForRestore(ctx, s, taskName)
+		if err != nil {
+			return tree, id, errors.Trace(err)
+		}
+		rc.checkpointChecksum = checkpointChecksum
+		// use the later time to adjust the summary elapsed time.
+		if t1 > t2 {
+			summary.AdjustStartTimeToEarlierTime(t1)
+		} else {
+			summary.AdjustStartTimeToEarlierTime(t2)
+		}
+	} else {
+		// initialize the checkpoint metadata since it is the first time to restore.
+		if err = checkpoint.SaveCheckpointMetadataForRestore(ctx, s, &checkpoint.CheckpointMetadata{
+			GCServiceId: id,
+			BackupTS:    *restoreTS,
+		}, taskName); err != nil {
+			return tree, id, errors.Trace(err)
+		}
+	}
+
+	rc.checkpointRunner, err = checkpoint.StartCheckpointRunnerForRestore(ctx, s, rc.cipher, taskName)
+	return tree, id, errors.Trace(err)
+}
+
+func (rc *Client) WaitForFinishCheckpoint(ctx context.Context) {
+	if rc.checkpointRunner != nil {
+		rc.checkpointRunner.WaitForFinish(ctx)
+	}
+}
+
+func (rc *Client) GetCheckpointRunner() *checkpoint.RestoreRunner {
+	return rc.checkpointRunner
 }
 
 func (rc *Client) allocTableIDs(ctx context.Context, tables []*metautil.Table) error {
@@ -1451,36 +1540,52 @@ func (rc *Client) execChecksum(
 		ctx = opentracing.ContextWithSpan(ctx, span1)
 	}
 
-	startTS, err := rc.GetTSWithRetry(ctx)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	exe, err := checksum.NewExecutorBuilder(tbl.Table, startTS).
-		SetOldTable(tbl.OldTable).
-		SetConcurrency(concurrency).
-		SetOldKeyspace(tbl.RewriteRule.OldKeyspace).
-		SetNewKeyspace(tbl.RewriteRule.NewKeyspace).
-		Build()
-	if err != nil {
-		return errors.Trace(err)
-	}
-	checksumResp, err := exe.Execute(ctx, kvClient, func() {
-		// TODO: update progress here.
-	})
-	if err != nil {
-		return errors.Trace(err)
+	item, exists := rc.checkpointChecksum[tbl.Table.ID]
+	if !exists {
+		beginT := time.Now()
+		startTS, err := rc.GetTSWithRetry(ctx)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		exe, err := checksum.NewExecutorBuilder(tbl.Table, startTS).
+			SetOldTable(tbl.OldTable).
+			SetConcurrency(concurrency).
+			SetOldKeyspace(tbl.RewriteRule.OldKeyspace).
+			SetNewKeyspace(tbl.RewriteRule.NewKeyspace).
+			Build()
+		if err != nil {
+			return errors.Trace(err)
+		}
+		checksumResp, err := exe.Execute(ctx, kvClient, func() {
+			// TODO: update progress here.
+		})
+		if err != nil {
+			return errors.Trace(err)
+		}
+		item = &checkpoint.ChecksumItem{
+			TableID:    tbl.Table.ID,
+			Crc64xor:   checksumResp.Checksum,
+			TotalKvs:   checksumResp.TotalKvs,
+			TotalBytes: checksumResp.TotalBytes,
+		}
+		if rc.checkpointRunner != nil {
+			err = rc.checkpointRunner.FlushChecksumItem(ctx, item, time.Since(beginT).Seconds())
+			if err != nil {
+				return errors.Trace(err)
+			}
+		}
 	}
 	table := tbl.OldTable
-	if checksumResp.Checksum != table.Crc64Xor ||
-		checksumResp.TotalKvs != table.TotalKvs ||
-		checksumResp.TotalBytes != table.TotalBytes {
+	if item.Crc64xor != table.Crc64Xor ||
+		item.TotalKvs != table.TotalKvs ||
+		item.TotalBytes != table.TotalBytes {
 		logger.Error("failed in validate checksum",
 			zap.Uint64("origin tidb crc64", table.Crc64Xor),
-			zap.Uint64("calculated crc64", checksumResp.Checksum),
+			zap.Uint64("calculated crc64", item.Crc64xor),
 			zap.Uint64("origin tidb total kvs", table.TotalKvs),
-			zap.Uint64("calculated total kvs", checksumResp.TotalKvs),
+			zap.Uint64("calculated total kvs", item.TotalKvs),
 			zap.Uint64("origin tidb total bytes", table.TotalBytes),
-			zap.Uint64("calculated total bytes", checksumResp.TotalBytes),
+			zap.Uint64("calculated total bytes", item.TotalBytes),
 		)
 		return errors.Annotate(berrors.ErrRestoreChecksumMismatch, "failed to validate checksum")
 	}
