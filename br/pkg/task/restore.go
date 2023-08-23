@@ -600,8 +600,8 @@ func runRestore(c context.Context, g glue.Glue, cmdName string, cfg *RestoreConf
 		if !isTableRestore(cmdName) {
 			return errors.Errorf("not the restore table when use duplicate restore")
 		}
-		if len(dbs) != 0 || len(tables) != 1 {
-			return errors.Errorf("not restore only one table: dbs length: %d, table length: %d", len(dbs), len(tables))
+		if len(tables) != 1 {
+			return errors.Errorf("not restore only one table: table length: %d", len(tables))
 		}
 		oname := tables[0].Info.Name
 		tables[0].Info.Name = model.CIStr{
