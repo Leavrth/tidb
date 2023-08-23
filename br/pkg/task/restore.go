@@ -4,6 +4,7 @@ package task
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/br/pkg/version"
 	"github.com/pingcap/tidb/config"
+	"github.com/pingcap/tidb/parser/model"
 	"github.com/pingcap/tidb/util"
 	"github.com/pingcap/tidb/util/mathutil"
 	"github.com/spf13/cobra"
@@ -66,6 +68,8 @@ const (
 	FlagPiTRConcurrency = "pitr-concurrency"
 
 	FlagResetSysUsers = "reset-sys-users"
+
+	FlagDupSuffix = "dup-suffix"
 
 	defaultPiTRBatchCount     = 8
 	defaultPiTRBatchSize      = 16 * 1024 * 1024
@@ -124,6 +128,7 @@ func DefineRestoreCommonFlags(flags *pflag.FlagSet) {
 		"the threshold of merging small regions (Default 960_000, region split key count)")
 	flags.Uint(FlagPDConcurrency, defaultPDConcurrency,
 		"concurrency pd-relative operations like split & scatter.")
+	flags.String(FlagDupSuffix, "", "duplicate restore table suffix id")
 	flags.Duration(FlagBatchFlushInterval, defaultBatchFlushInterval,
 		"after how long a restore batch would be auto sent.")
 	flags.Uint(FlagDdlBatchSize, defaultFlagDdlBatchSize,
@@ -208,6 +213,9 @@ type RestoreConfig struct {
 	VolumeThroughput    int64                 `json:"volume-throughput" toml:"volume-throughput"`
 	ProgressFile        string                `json:"progress-file" toml:"progress-file"`
 	TargetAZ            string                `json:"target-az" toml:"target-az"`
+
+	// duplicated restore
+	DupSuffix string `json:"dup-suffix" toml:"dup-suffix"`
 }
 
 // DefineRestoreFlags defines common flags for the restore tidb command.
@@ -299,6 +307,11 @@ func (cfg *RestoreConfig) ParseFromFlags(flags *pflag.FlagSet) error {
 	cfg.BatchFlushInterval, err = flags.GetDuration(FlagBatchFlushInterval)
 	if err != nil {
 		return errors.Annotatef(err, "failed to get flag %s", FlagBatchFlushInterval)
+	}
+
+	cfg.DupSuffix, err = flags.GetString(FlagDupSuffix)
+	if err != nil {
+		return errors.Annotatef(err, "failed to get flag %s", FlagDupSuffix)
 	}
 
 	cfg.DdlBatchSize, err = flags.GetUint(FlagDdlBatchSize)
@@ -494,6 +507,10 @@ func IsStreamRestore(cmdName string) bool {
 	return cmdName == PointRestoreCmd
 }
 
+func isTableRestore(cmdName string) bool {
+	return cmdName == TableRestoreCmd
+}
+
 // RunRestore starts a restore task inside the current goroutine.
 func RunRestore(c context.Context, g glue.Glue, cmdName string, cfg *RestoreConfig) error {
 	if err := checkTaskExists(c, cfg); err != nil {
@@ -578,6 +595,19 @@ func runRestore(c context.Context, g glue.Glue, cmdName string, cfg *RestoreConf
 	files, tables, dbs := filterRestoreFiles(client, cfg)
 	if len(dbs) == 0 && len(tables) != 0 {
 		return errors.Annotate(berrors.ErrRestoreInvalidBackup, "contain tables but no databases")
+	}
+	if len(cfg.DupSuffix) > 0 {
+		if !isTableRestore(cmdName) {
+			return errors.Errorf("not the restore table when use duplicate restore")
+		}
+		if len(dbs) != 0 || len(tables) != 1 {
+			return errors.Errorf("not restore only one table: dbs length: %d, table length: %d", len(dbs), len(tables))
+		}
+		oname := tables[0].Info.Name
+		tables[0].Info.Name = model.CIStr{
+			O: fmt.Sprintf("%s%s", oname.O, cfg.DupSuffix),
+			L: fmt.Sprintf("%s%s", oname.L, cfg.DupSuffix),
+		}
 	}
 
 	archiveSize := reader.ArchiveSize(ctx, files)
