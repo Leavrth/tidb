@@ -148,6 +148,7 @@ func walkLeafMetaFile(
 type Table struct {
 	DB              *model.DBInfo
 	Info            *model.TableInfo
+	RewriteID       int64
 	Crc64Xor        uint64
 	TotalKvs        uint64
 	TotalBytes      uint64

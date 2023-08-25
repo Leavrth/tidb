@@ -69,7 +69,9 @@ const (
 
 	FlagResetSysUsers = "reset-sys-users"
 
-	FlagDupSuffix = "dup-suffix"
+	FlagDupPrefix = "dup-prefix"
+	FlagDupStart  = "dup-start"
+	FlagDupEnd    = "dup-end"
 
 	defaultPiTRBatchCount     = 8
 	defaultPiTRBatchSize      = 16 * 1024 * 1024
@@ -128,7 +130,9 @@ func DefineRestoreCommonFlags(flags *pflag.FlagSet) {
 		"the threshold of merging small regions (Default 960_000, region split key count)")
 	flags.Uint(FlagPDConcurrency, defaultPDConcurrency,
 		"concurrency pd-relative operations like split & scatter.")
-	flags.String(FlagDupSuffix, "", "duplicate restore table suffix id")
+	flags.Int(FlagDupStart, 0, "duplicate restore table suffix start id")
+	flags.Int(FlagDupEnd, 0, "duplicate restore table suffix end id")
+	flags.String(FlagDupPrefix, "", "duplicate restore table prefix")
 	flags.Duration(FlagBatchFlushInterval, defaultBatchFlushInterval,
 		"after how long a restore batch would be auto sent.")
 	flags.Uint(FlagDdlBatchSize, defaultFlagDdlBatchSize,
@@ -215,7 +219,9 @@ type RestoreConfig struct {
 	TargetAZ            string                `json:"target-az" toml:"target-az"`
 
 	// duplicated restore
-	DupSuffix string `json:"dup-suffix" toml:"dup-suffix"`
+	DupPrefix string `json:"dup-prefix" toml:"dup-prefix"`
+	DupStart  int    `json:"dup-start" toml:"dup-start"`
+	DupEnd    int    `json:"dup-end" toml:"dup-end"`
 }
 
 // DefineRestoreFlags defines common flags for the restore tidb command.
@@ -309,9 +315,18 @@ func (cfg *RestoreConfig) ParseFromFlags(flags *pflag.FlagSet) error {
 		return errors.Annotatef(err, "failed to get flag %s", FlagBatchFlushInterval)
 	}
 
-	cfg.DupSuffix, err = flags.GetString(FlagDupSuffix)
+	cfg.DupPrefix, err = flags.GetString(FlagDupPrefix)
 	if err != nil {
-		return errors.Annotatef(err, "failed to get flag %s", FlagDupSuffix)
+		return errors.Annotatef(err, "failed to get flag %s", FlagDupPrefix)
+	}
+	cfg.DupStart, err = flags.GetInt(FlagDupStart)
+	if err != nil {
+		return errors.Annotatef(err, "failed to get flag %s", FlagDupStart)
+	}
+
+	cfg.DupEnd, err = flags.GetInt(FlagDupEnd)
+	if err != nil {
+		return errors.Annotatef(err, "failed to get flag %s", FlagDupEnd)
 	}
 
 	cfg.DdlBatchSize, err = flags.GetUint(FlagDdlBatchSize)
@@ -596,18 +611,21 @@ func runRestore(c context.Context, g glue.Glue, cmdName string, cfg *RestoreConf
 	if len(dbs) == 0 && len(tables) != 0 {
 		return errors.Annotate(berrors.ErrRestoreInvalidBackup, "contain tables but no databases")
 	}
-	if len(cfg.DupSuffix) > 0 {
+	if cfg.DupStart > 0 && cfg.DupEnd > 0 {
 		if !isTableRestore(cmdName) {
 			return errors.Errorf("not the restore table when use duplicate restore")
 		}
-		if len(tables) != 1 {
+		if len(tables) != cfg.DupEnd-cfg.DupStart+1 {
 			return errors.Errorf("not restore only one table: table length: %d", len(tables))
 		}
-		oname := tables[0].Info.Name
-		tables[0].Info.Name = model.CIStr{
-			O: fmt.Sprintf("%s%s", oname.O, cfg.DupSuffix),
-			L: fmt.Sprintf("%s%s", oname.L, cfg.DupSuffix),
+		for k, tbl := range tables {
+			tbl.Info.Name = model.CIStr{
+				O: fmt.Sprintf("%s%d", cfg.DupPrefix, cfg.DupStart+k),
+				L: fmt.Sprintf("%s%d", cfg.DupPrefix, cfg.DupStart+k),
+			}
 		}
+	} else if cfg.DupStart+cfg.DupEnd > 0 {
+		return errors.Errorf("invalid ")
 	}
 
 	archiveSize := reader.ArchiveSize(ctx, files)
