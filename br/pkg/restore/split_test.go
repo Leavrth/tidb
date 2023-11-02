@@ -315,7 +315,7 @@ func TestScatterFinishInTime(t *testing.T) {
 
 	// When using a exponential backoffer, if we try to backoff more than 40 times in 10 regions,
 	// it would cost time unacceptable.
-	regionSplitter.ScatterRegionsWithBackoffer(ctx,
+	regionSplitter.ScatterRegionsSequentially(ctx,
 		regionInfos,
 		assertRetryLessThan(t, 40))
 }
