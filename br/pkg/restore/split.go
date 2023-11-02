@@ -126,26 +126,9 @@ SplitRegions:
 	if errSplit != nil {
 		return errors.Trace(errSplit)
 	}
-	log.Info("start to wait for scattering regions",
-		zap.Int("regions", len(scatterRegions)), zap.Duration("take", time.Since(startTime)))
-	startTime = time.Now()
-	scatterCount := 0
-	for _, region := range scatterRegions {
-		rs.waitForScatterRegion(ctx, region)
-		if time.Since(startTime) > split.ScatterWaitUpperInterval {
-			break
-		}
-		scatterCount++
-	}
-	if scatterCount == len(scatterRegions) {
-		log.Info("waiting for scattering regions done",
-			zap.Int("regions", len(scatterRegions)), zap.Duration("take", time.Since(startTime)))
-	} else {
-		log.Warn("waiting for scattering regions timeout",
-			zap.Int("scatterCount", scatterCount),
-			zap.Int("regions", len(scatterRegions)),
-			zap.Duration("take", time.Since(startTime)))
-	}
+	log.Info("finish splitting and scattering regions. and starts to wait", zap.Int("regions", len(scatterRegions)),
+		zap.Duration("take", time.Since(startTime)))
+	rs.waitRegionsScattered(ctx, scatterRegions)
 	return nil
 }
 
@@ -235,6 +218,9 @@ func (rs *RegionSplitter) isScatterRegionFinished(ctx context.Context, regionID 
 	return ok, nil
 }
 
+func (rs *RegionSplitter) waitForSplits(ctx context.Context, regionIDs []uint64) {
+}
+
 func (rs *RegionSplitter) waitForSplit(ctx context.Context, regionID uint64) {
 	interval := split.SplitCheckInterval
 	for i := 0; i < split.SplitCheckMaxRetryTimes; i++ {
@@ -258,26 +244,21 @@ type retryTimeKey struct{}
 
 var retryTimes = new(retryTimeKey)
 
-func (rs *RegionSplitter) waitForScatterRegion(ctx context.Context, regionInfo *split.RegionInfo) {
-	interval := split.ScatterWaitInterval
-	regionID := regionInfo.Region.GetId()
-	for i := 0; i < split.ScatterWaitMaxRetryTimes; i++ {
-		ctx1 := context.WithValue(ctx, retryTimes, i)
-		ok, err := rs.isScatterRegionFinished(ctx1, regionID)
-		if err != nil {
-			log.Warn("scatter region failed: do not have the region",
-				logutil.Region(regionInfo.Region))
-			return
-		}
-		if ok {
-			break
-		}
-		interval = 2 * interval
-		if interval > split.ScatterMaxWaitInterval {
-			interval = split.ScatterMaxWaitInterval
-		}
-		time.Sleep(interval)
+func (rs *RegionSplitter) splitAndWaitRegions(
+	ctx context.Context, regionInfo *split.RegionInfo, keys [][]byte,
+) ([]*split.RegionInfo, error) {
+	if len(keys) == 0 {
+		return []*split.RegionInfo{regionInfo}, nil
 	}
+	newRegions, err := rs.client.BatchSplitRegions(ctx, regionInfo, keys)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	// Wait for a while until the regions successfully split.
+	for _, region := range newRegions {
+		rs.waitForSplit(ctx, region.Region.Id)
+	}
+	return newRegions, nil
 }
 
 func (rs *RegionSplitter) splitAndScatterRegions(
@@ -298,28 +279,21 @@ func (rs *RegionSplitter) splitAndScatterRegions(
 		for ; i < len(keys); i += interval {
 			pickKeys = append(pickKeys, keys[i])
 		}
-		newPickRegions, err := rs.client.BatchSplitRegions(ctx, regionInfo, pickKeys)
+		newPickRegions, err := rs.splitAndWaitRegions(ctx, regionInfo, pickKeys)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
 		// scatter these pick keys first
-		rs.ScatterRegions(ctx, newPickRegions)
-		var wg sync.WaitGroup
-		pool := utils.NewWorkerPool(10, "wait_scatter")
-		for _, region := range newPickRegions {
-			r := region
-			pool.Apply(func() {
-				rs.waitForScatterRegion(ctx, r)
-			})
-		}
-		wg.Wait()
+		// assumption: pick keys would be too much
+		// so we could wait these regions scattered.
+		rs.ScatterRegionsSync(ctx, newPickRegions)
 		return nil, rs.ScanAndSplitScatter(ctx, splitContext, keys)
 	} else {
-		newRegions, err := rs.client.BatchSplitRegions(ctx, regionInfo, keys)
+		newRegions, err := rs.splitAndWaitRegions(ctx, regionInfo, keys)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
-		rs.ScatterRegions(ctx, newRegions)
+		rs.ScatterRegionsAsync(ctx, newRegions)
 		return newRegions, nil
 	}
 }
@@ -389,13 +363,11 @@ func isUnsupportedError(err error) bool {
 		strings.Contains(s.Message(), "region 0 not found")
 }
 
-// ScatterRegions scatter the regions.
-func (rs *RegionSplitter) ScatterRegions(ctx context.Context, newRegions []*split.RegionInfo) {
-	for _, region := range newRegions {
-		// Wait for a while until the regions successfully split.
-		rs.waitForSplit(ctx, region.Region.Id)
-	}
-
+// ScatterRegionsAsync scatter the regions.
+// for same reason just log and ignore error.
+// See the comments of function waitRegionScattered.
+func (rs *RegionSplitter) ScatterRegionsAsync(ctx context.Context, newRegions []*split.RegionInfo) {
+	log.Info("start to scatter regions", zap.Int("regions", len(newRegions)))
 	// the retry is for the temporary network errors during sending request.
 	err := utils.WithRetry(ctx, func() error {
 		err := rs.client.ScatterRegions(ctx, newRegions)
@@ -410,14 +382,70 @@ func (rs *RegionSplitter) ScatterRegions(ctx context.Context, newRegions []*spli
 				})
 			return nil
 		}
-		if err != nil {
-			log.Warn("scatter region meet error", logutil.ShortError(err))
-		}
 		return err
 	}, &split.ExponentialBackoffer{Attempts: 3, BaseBackoff: 500 * time.Millisecond})
-
 	if err != nil {
-		log.Warn("failed to batch scatter region", logutil.ShortError(err))
+		log.Warn("failed to scatter regions", logutil.ShortError(err))
+	}
+}
+
+// ScatterRegionsSync scatter the regions and wait these region scattered from PD.
+// for same reason just log and ignore error.
+// See the comments of function waitRegionScattered.
+func (rs *RegionSplitter) ScatterRegionsSync(ctx context.Context, newRegions []*split.RegionInfo) {
+	rs.ScatterRegionsAsync(ctx, newRegions)
+	rs.waitRegionsScattered(ctx, newRegions)
+}
+
+// waitRegionsScattered try to wait mutilple regions scatterd in 3 minutes.
+// this could timeout, but if many regions scatterd the restore could contine
+// so we don't wait long time here.
+func (rs *RegionSplitter) waitRegionsScattered(ctx context.Context, scatterRegions []*split.RegionInfo) {
+	log.Info("start to wait for scattering regions", zap.Int("regions", len(scatterRegions)))
+	startTime := time.Now()
+	scatterCount := 0
+	for _, region := range scatterRegions {
+		rs.waitRegionScattered(ctx, region)
+		if time.Since(startTime) > split.ScatterWaitUpperInterval {
+			break
+		}
+		scatterCount++
+	}
+	if scatterCount == len(scatterRegions) {
+		log.Info("waiting for scattering regions done",
+			zap.Int("regions", len(scatterRegions)),
+			zap.Duration("take", time.Since(startTime)))
+	} else {
+		log.Warn("waiting for scattering regions timeout",
+			zap.Int("scatterCount", scatterCount),
+			zap.Int("regions", len(scatterRegions)),
+			zap.Duration("take", time.Since(startTime)))
+	}
+}
+
+// waitRegionsScattered try to wait single region scatterd
+// because we may not get the accurate result of scatter region.
+// even we got error here the scatter could also succeed.
+// so add a warn log and ignore error does make sense here.
+func (rs *RegionSplitter) waitRegionScattered(ctx context.Context, regionInfo *split.RegionInfo) {
+	state := utils.InitialRetryState(split.ScatterWaitMaxRetryTimes, split.ScatterWaitInterval, split.ScatterMaxWaitInterval)
+	retryCount := 0
+	err := utils.WithRetry(ctx, func() error {
+		ctx1 := context.WithValue(ctx, retryTimes, retryCount)
+		ok, err := rs.isScatterRegionFinished(ctx1, regionInfo.Region.Id)
+		if err != nil {
+			log.Warn("scatter region failed: do not have the region",
+				logutil.Region(regionInfo.Region))
+			return err
+		}
+		if ok {
+			return nil
+		}
+		retryCount++
+		return errors.Annotatef(berrors.ErrPDUnknownScatterResult, "try wait region scatter")
+	}, &state)
+	if err != nil {
+		log.Warn("wait scatter region meet error", logutil.Region(regionInfo.Region), logutil.ShortError(err))
 	}
 }
 
@@ -824,7 +852,7 @@ func (helper *LogSplitHelper) Split(ctx context.Context) error {
 		startTime := time.Now()
 		regionSplitter := NewRegionSplitter(helper.client)
 		for _, region := range scatterRegions {
-			regionSplitter.waitForScatterRegion(ctx, region)
+			regionSplitter.waitRegionsScattered(ctx, region)
 			// It is too expensive to stop recovery and wait for a small number of regions
 			// to complete scatter, so the maximum waiting time is reduced to 1 minute.
 			if time.Since(startTime) > time.Minute {
