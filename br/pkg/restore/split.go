@@ -200,7 +200,7 @@ func (rs *RegionSplitter) splitAndScatterRegions(
 	}
 }
 
-// splitRegionsSync perform batcsplit on a region by keys
+// splitRegionsSync perform batchSplit on a region by keys
 // and then check the batch split success or not.
 func (rs *RegionSplitter) splitRegionsSync(
 	ctx context.Context, regionInfo *split.RegionInfo, keys [][]byte,
