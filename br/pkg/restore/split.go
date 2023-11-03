@@ -190,14 +190,13 @@ func (rs *RegionSplitter) splitAndScatterRegions(
 		// so we could wait these regions scattered.
 		rs.ScatterRegionsSync(ctx, newPickRegions)
 		return nil, rs.executeSplitByKeys(ctx, splitContext, keys)
-	} else {
-		newRegions, err := rs.splitRegionsSync(ctx, regionInfo, keys)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		rs.ScatterRegionsAsync(ctx, newRegions)
-		return newRegions, nil
 	}
+	newRegions, err := rs.splitRegionsSync(ctx, regionInfo, keys)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	rs.ScatterRegionsAsync(ctx, newRegions)
+	return newRegions, nil
 }
 
 // splitRegionsSync perform batchSplit on a region by keys
@@ -265,7 +264,7 @@ func (rs *RegionSplitter) waitRegionSplitted(ctx context.Context, regionID uint6
 		split.SplitCheckInterval,
 		split.SplitMaxCheckInterval,
 	)
-	utils.WithRetry(ctx, func() error {
+	utils.WithRetry(ctx, func() error { //nolint: errcheck
 		ok, err := rs.hasHealthyRegion(ctx, regionID)
 		if err != nil {
 			log.Warn("wait for split failed", zap.Uint64("regionID", regionID), zap.Error(err))
@@ -279,7 +278,7 @@ func (rs *RegionSplitter) waitRegionSplitted(ctx context.Context, regionID uint6
 }
 
 // waitRegionsScattered try to wait mutilple regions scatterd in 3 minutes.
-// this could timeout, but if many regions scatterd the restore could contine
+// this could timeout, but if many regions scatterd the restore could continue
 // so we don't wait long time here.
 func (rs *RegionSplitter) waitRegionsScattered(ctx context.Context, scatterRegions []*split.RegionInfo, timeout time.Duration) {
 	log.Info("start to wait for scattering regions", zap.Int("regions", len(scatterRegions)))
