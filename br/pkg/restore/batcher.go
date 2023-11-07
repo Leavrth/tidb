@@ -4,6 +4,7 @@ package restore
 
 import (
 	"context"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -91,6 +92,10 @@ func (b *Batcher) contextCleaner(ctx context.Context, tables <-chan []CreatedTab
 				b.sendErr <- err
 				return
 			}
+			log.Info("table sorted", zap.Int("tabels", len(tbls)))
+			sort.Slice(tbls, func(i, j int) bool {
+				return tbls[i].Table.ID < tbls[j].Table.ID
+			})
 			for _, tbl := range tbls {
 				cloneTable := tbl
 				b.outCh <- &cloneTable

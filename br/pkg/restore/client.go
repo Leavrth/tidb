@@ -27,6 +27,7 @@ import (
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/br/pkg/checkpoint"
 	"github.com/pingcap/tidb/br/pkg/checksum"
+	"github.com/pingcap/tidb/br/pkg/conn"
 	"github.com/pingcap/tidb/br/pkg/conn/util"
 	berrors "github.com/pingcap/tidb/br/pkg/errors"
 	"github.com/pingcap/tidb/br/pkg/glue"
@@ -123,6 +124,7 @@ type Client struct {
 	hasSpeedLimited bool
 
 	restoreStores []uint64
+	storeCount    int
 
 	cipher             *backuppb.CipherInfo
 	switchModeInterval time.Duration
@@ -459,6 +461,10 @@ func (rc *Client) GetSupportPolicy() bool {
 
 func (rc *Client) GetDomain() *domain.Domain {
 	return rc.dom
+}
+
+func (rc *Client) GetStoreCount() int {
+	return rc.storeCount
 }
 
 // GetPDClient returns a pd client.
@@ -2001,6 +2007,23 @@ const (
 
 // LoadRestoreStores loads the stores used to restore data.
 func (rc *Client) LoadRestoreStores(ctx context.Context) error {
+	stores, err := conn.GetAllTiKVStoresWithRetry(ctx, rc.pdClient, util.SkipTiFlash)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	for _, s := range stores {
+		if s.GetState() != metapb.StoreState_Up {
+			continue
+		}
+		rc.storeCount++
+		for _, l := range s.GetLabels() {
+			if l.GetKey() == restoreLabelKey && l.GetValue() == restoreLabelValue {
+				rc.restoreStores = append(rc.restoreStores, s.GetId())
+				break
+			}
+		}
+	}
+
 	if !rc.isOnline {
 		return nil
 	}
@@ -2010,21 +2033,6 @@ func (rc *Client) LoadRestoreStores(ctx context.Context) error {
 		ctx = opentracing.ContextWithSpan(ctx, span1)
 	}
 
-	stores, err := rc.pdClient.GetAllStores(ctx)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	for _, s := range stores {
-		if s.GetState() != metapb.StoreState_Up {
-			continue
-		}
-		for _, l := range s.GetLabels() {
-			if l.GetKey() == restoreLabelKey && l.GetValue() == restoreLabelValue {
-				rc.restoreStores = append(rc.restoreStores, s.GetId())
-				break
-			}
-		}
-	}
 	log.Info("load restore stores", zap.Uint64s("store-ids", rc.restoreStores))
 	return nil
 }
