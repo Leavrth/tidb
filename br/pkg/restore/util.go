@@ -504,11 +504,7 @@ func SplitRanges(
 ) error {
 	splitter := NewRegionSplitter(split.NewSplitClient(client.GetPDClient(), client.GetTLSConfig(), isRawKv))
 
-<<<<<<< HEAD
 	return splitter.ExecuteSplit(ctx, ranges, rewriteRules, client.GetStoreCount(), isRawKv, func(keys [][]byte) {
-=======
-	return splitter.ExecuteSplit(ctx, ranges, rewriteRules, client.GetRestoreStoreCount(), isRawKv, func(keys [][]byte) {
->>>>>>> f079d10ccaa42a6d742ebbd0eb8ff30c496616d4
 		for range keys {
 			updateCh.Inc()
 		}

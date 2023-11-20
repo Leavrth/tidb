@@ -25,7 +25,6 @@ import (
 	"github.com/pingcap/tidb/br/pkg/utils/iter"
 	"github.com/pingcap/tidb/pkg/tablecodec"
 	"github.com/pingcap/tidb/pkg/util/codec"
-	"github.com/pingcap/tidb/pkg/util/mathutil"
 	"go.uber.org/multierr"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -38,17 +37,11 @@ type retryTimeKey struct{}
 var retryTimes = new(retryTimeKey)
 
 type SplitContext struct {
-<<<<<<< HEAD
 	isRawKv     bool
 	needScatter bool
 	waitScatter bool
 	storeCount  int
 	onSplit     OnSplitFunc
-=======
-	isRawKv    bool
-	storeCount int
-	onSplit    OnSplitFunc
->>>>>>> f079d10ccaa42a6d742ebbd0eb8ff30c496616d4
 }
 
 // RegionSplitter is a executor of region split by rules.
@@ -98,7 +91,6 @@ func (rs *RegionSplitter) ExecuteSplit(
 		return errors.Trace(errSplit)
 	}
 	sortedKeys := make([][]byte, 0, len(sortedRanges))
-<<<<<<< HEAD
 	totalRangeSize := uint64(0)
 	for _, r := range sortedRanges {
 		sortedKeys = append(sortedKeys, r.EndKey)
@@ -113,20 +105,10 @@ func (rs *RegionSplitter) ExecuteSplit(
 	}
 	if len(sortedKeys) > 1024 && storeCount > 3 {
 		return rs.executeSplitByRanges(ctx, sctx, sortedRanges)
-=======
-	for _, r := range sortedRanges {
-		sortedKeys = append(sortedKeys, r.EndKey)
-	}
-	sctx := SplitContext{
-		isRawKv:    isRawKv,
-		onSplit:    onSplit,
-		storeCount: storeCount,
->>>>>>> f079d10ccaa42a6d742ebbd0eb8ff30c496616d4
 	}
 	return rs.executeSplitByKeys(ctx, sctx, sortedKeys)
 }
 
-<<<<<<< HEAD
 func (rs *RegionSplitter) executeSplitByRanges(
 	ctx context.Context,
 	splitContext SplitContext,
@@ -135,27 +117,12 @@ func (rs *RegionSplitter) executeSplitByRanges(
 	startTime := time.Now()
 	minKey := codec.EncodeBytesExt(nil, sortedRanges[0].StartKey, splitContext.isRawKv)
 	maxKey := codec.EncodeBytesExt(nil, sortedRanges[len(sortedRanges)-1].EndKey, splitContext.isRawKv)
-=======
-// executeSplitByKeys will split regions by **sorted** keys with following steps.
-// 1. locate regions with correspond keys.
-// 2. split these regions with correspond keys.
-// 3. make sure new splitted regions are balanced.
-func (rs *RegionSplitter) executeSplitByKeys(
-	ctx context.Context,
-	splitContext SplitContext,
-	sortedKeys [][]byte,
-) error {
-	startTime := time.Now()
-	minKey := codec.EncodeBytesExt(nil, sortedKeys[0], splitContext.isRawKv)
-	maxKey := codec.EncodeBytesExt(nil, sortedKeys[len(sortedKeys)-1], splitContext.isRawKv)
->>>>>>> f079d10ccaa42a6d742ebbd0eb8ff30c496616d4
 	scatterRegions := make([]*split.RegionInfo, 0)
 
 	err := utils.WithRetry(ctx, func() error {
 		regions, err := split.PaginateScanRegion(ctx, rs.client, minKey, maxKey, split.ScanRegionPaginationLimit)
 		if err != nil {
 			return err
-<<<<<<< HEAD
 		}
 		lastSortedIndex := 0
 		sortedIndex := 0
@@ -253,9 +220,6 @@ func (rs *RegionSplitter) executeSplitByKeys(
 		if err != nil {
 			return err
 		}
-=======
-		}
->>>>>>> f079d10ccaa42a6d742ebbd0eb8ff30c496616d4
 		splitKeyMap := getSplitKeys(splitContext, sortedKeys, regions)
 		regionMap := make(map[uint64]*split.RegionInfo)
 		for _, region := range regions {
@@ -264,27 +228,11 @@ func (rs *RegionSplitter) executeSplitByKeys(
 		for regionID, keys := range splitKeyMap {
 			var newRegions []*split.RegionInfo
 			region := regionMap[regionID]
-<<<<<<< HEAD
 			log.Info("get split keys for split regions",
 				logutil.Region(region.Region), logutil.Keys(keys),
 				zap.Bool("need scatter", splitContext.needScatter))
 			newRegions, err := rs.splitAndScatterRegions(ctx, splitContext, region, keys)
 			if err != nil {
-=======
-			log.Info("split regions", logutil.Region(region.Region), logutil.Keys(keys))
-			newRegions, err := rs.splitAndScatterRegions(ctx, splitContext, region, keys)
-			if err != nil {
-				if strings.Contains(err.Error(), "no valid key") {
-					for _, key := range keys {
-						// Region start/end keys are encoded. split_region RPC
-						// requires raw keys (without encoding).
-						log.Error("split regions no valid key",
-							logutil.Key("startKey", region.Region.StartKey),
-							logutil.Key("endKey", region.Region.EndKey),
-							logutil.Key("key", codec.EncodeBytesExt(nil, key, splitContext.isRawKv)))
-					}
-				}
->>>>>>> f079d10ccaa42a6d742ebbd0eb8ff30c496616d4
 				return err
 			}
 			if len(newRegions) != len(keys) {
@@ -292,14 +240,10 @@ func (rs *RegionSplitter) executeSplitByKeys(
 					zap.Int("new region count", len(newRegions)),
 					zap.Int("split key count", len(keys)))
 			}
-<<<<<<< HEAD
 			if splitContext.needScatter {
 				log.Info("scattered regions", zap.Int("count", len(newRegions)))
 				scatterRegions = append(scatterRegions, newRegions...)
 			}
-=======
-			scatterRegions = append(scatterRegions, newRegions...)
->>>>>>> f079d10ccaa42a6d742ebbd0eb8ff30c496616d4
 			splitContext.onSplit(keys)
 		}
 		return nil
@@ -316,7 +260,6 @@ func (rs *RegionSplitter) executeSplitByKeys(
 func (rs *RegionSplitter) splitAndScatterRegions(
 	ctx context.Context, splitContext SplitContext, regionInfo *split.RegionInfo, keys [][]byte,
 ) ([]*split.RegionInfo, error) {
-<<<<<<< HEAD
 	if len(keys) < splitContext.storeCount {
 		return []*split.RegionInfo{regionInfo}, nil
 	}
@@ -362,38 +305,6 @@ func (rs *RegionSplitter) splitAndScatterRegions(
 			rs.ScatterRegionsAsync(ctx, append(newRegions, regionInfo))
 		}
 	}
-=======
-	if len(keys) == 0 {
-		return []*split.RegionInfo{regionInfo}, nil
-	}
-
-	// keys are sorted
-	storeCount := splitContext.storeCount
-	if len(keys) >= 1024 && storeCount > 3 {
-		// pick keys by store
-		// the max interval should be 100
-		interval := mathutil.Max(100, len(keys)*1.0/storeCount)
-		pickKeys := make([][]byte, 0, len(keys)/interval)
-		i := interval
-		for ; i < len(keys); i += interval {
-			pickKeys = append(pickKeys, keys[i])
-		}
-		newPickRegions, err := rs.splitRegionsSync(ctx, regionInfo, pickKeys)
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		// scatter these pick keys first
-		// assumption: pick keys would be too much
-		// so we could wait these regions scattered.
-		rs.ScatterRegionsSync(ctx, newPickRegions)
-		return nil, rs.executeSplitByKeys(ctx, splitContext, keys)
-	}
-	newRegions, err := rs.splitRegionsSync(ctx, regionInfo, keys)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	rs.ScatterRegionsAsync(ctx, newRegions)
->>>>>>> f079d10ccaa42a6d742ebbd0eb8ff30c496616d4
 	return newRegions, nil
 }
 
