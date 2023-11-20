@@ -127,29 +127,34 @@ func (rs *RegionSplitter) executeSplitByRanges(
 		lastSortedIndex := 0
 		sortedIndex := 0
 		splitRangeMap := make(map[uint64][]rtree.Range)
+		regionMap := make(map[uint64]*split.RegionInfo)
 		for _, region := range regions {
+			regionMap[region.Region.GetId()] = region
 			// collect all sortedKeys belong to this region
-			for bytes.Compare(sortedRanges[sortedIndex].EndKey, region.Region.GetEndKey()) < 0 {
+			if len(region.Region.GetEndKey()) == 0 {
+				splitRangeMap[region.Region.GetId()] = sortedRanges[lastSortedIndex:]
+				break
+			}
+			for sortedIndex < len(sortedRanges) && bytes.Compare(sortedRanges[sortedIndex].EndKey, region.Region.GetEndKey()) < 0 {
 				sortedIndex += 1
+			}
+			if sortedIndex >= len(sortedRanges) {
+				splitRangeMap[region.Region.GetId()] = sortedRanges[lastSortedIndex:]
+				break
 			}
 			splitRangeMap[region.Region.GetId()] = sortedRanges[lastSortedIndex:sortedIndex]
 			lastSortedIndex = sortedIndex
 		}
 
-		regionMap := make(map[uint64]*split.RegionInfo)
-		for _, region := range regions {
-			regionMap[region.Region.GetId()] = region
-		}
 		workerPool := utils.NewWorkerPool(uint(splitContext.storeCount), "split ranges")
-		var eg *errgroup.Group
+		eg, ectx := errgroup.WithContext(ctx)
 		for rID, rgs := range splitRangeMap {
-			regionID := rID
+			region := regionMap[rID]
 			ranges := rgs
 			sctx := splitContext
 			sctx.waitScatter = true
 			workerPool.ApplyOnErrorGroup(eg, func() error {
 				var newRegions []*split.RegionInfo
-				region := regionMap[regionID]
 				rangeSize := uint64(0)
 				allKeys := make([][]byte, 0, len(ranges))
 				for _, rg := range ranges {
@@ -172,7 +177,7 @@ func (rs *RegionSplitter) executeSplitByRanges(
 					zap.Uint64("expect split size", expectSplitSize),
 					zap.Bool("need scatter", sctx.needScatter),
 					logutil.Region(region.Region))
-				newRegions, err := rs.splitAndScatterRegions(ctx, sctx, region, keys)
+				newRegions, err := rs.splitAndScatterRegions(ectx, sctx, region, keys)
 				if err != nil {
 					return err
 				}
@@ -183,7 +188,7 @@ func (rs *RegionSplitter) executeSplitByRanges(
 				}
 				sctx.onSplit(keys)
 				sctx.needScatter = false
-				return rs.executeSplitByKeys(ctx, sctx, allKeys)
+				return rs.executeSplitByKeys(ectx, sctx, allKeys)
 			})
 		}
 		return eg.Wait()
