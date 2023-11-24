@@ -278,6 +278,7 @@ func (b *tikvSender) holdWorker(ctx context.Context,
 	inCh <-chan drainResultAndDone,
 	outCh chan<- drainResultAndDone,
 ) {
+	defer close(outCh)
 	res := make([]drainResultAndDone, 0, 20480)
 	for dr := range inCh {
 		res = append(res, dr)

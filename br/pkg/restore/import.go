@@ -568,10 +568,11 @@ func (importer *FileImporter) ImportSSTFiles(
 					logutil.ShortError(errDownload))
 				return errors.Trace(errDownload)
 			}
-			log.Debug("download file done",
+			log.Info("download file done",
 				zap.String("file-sample", files[0].Name), zap.Stringer("take", time.Since(start)),
 				logutil.Key("start", files[0].StartKey), logutil.Key("end", files[0].EndKey))
-			if errIngest := importer.ingest(dctx, info, downloadMetas); errIngest != nil {
+			start = time.Now()
+			if errIngest := importer.ingest(dctx, files, info, downloadMetas); errIngest != nil {
 				log.Warn("ingest file failed, retry later",
 					logutil.Files(files),
 					logutil.SSTMetas(downloadMetas),
@@ -579,9 +580,10 @@ func (importer *FileImporter) ImportSSTFiles(
 					zap.Error(errIngest))
 				return errors.Trace(errIngest)
 			}
+			log.Info("ingest file done", zap.String("file-sample", files[0].Name), zap.Stringer("take", time.Since(start)))
 		}
 
-		log.Debug("ingest file done", zap.String("file-sample", files[0].Name), zap.Stringer("take", time.Since(start)))
+		// log.Debug("ingest file done", zap.String("file-sample", files[0].Name), zap.Stringer("take", time.Since(start)))
 		for _, f := range files {
 			summary.CollectSuccessUnit(summary.TotalKV, 1, f.TotalKvs)
 			summary.CollectSuccessUnit(summary.TotalBytes, 1, f.TotalBytes)
@@ -836,6 +838,7 @@ func (importer *FileImporter) downloadRawKVSST(
 
 func (importer *FileImporter) ingest(
 	ctx context.Context,
+	files []*backuppb.File,
 	info *split.RegionInfo,
 	downloadMetas []*import_sstpb.SSTMeta,
 ) error {
@@ -869,7 +872,10 @@ func (importer *FileImporter) ingest(
 						break
 					}
 					// do not get region info, wait a second and GetRegion() again.
-					log.Warn("get region by key return nil", logutil.Region(info.Region))
+					log.Warn("ingest get region by key return nil", logutil.Region(info.Region),
+						logutil.Files(files),
+						logutil.SSTMetas(downloadMetas),
+					)
 					time.Sleep(time.Second)
 				}
 			}
@@ -877,7 +883,9 @@ func (importer *FileImporter) ingest(
 			if !split.CheckRegionEpoch(newInfo, info) {
 				return errors.Trace(berrors.ErrKVEpochNotMatch)
 			}
-			log.Debug("ingest sst returns not leader error, retry it",
+			log.Info("ingest sst returns not leader error, retry it",
+				logutil.Files(files),
+				logutil.SSTMetas(downloadMetas),
 				logutil.Region(info.Region),
 				zap.Stringer("newLeader", newInfo.Leader))
 			info = newInfo

@@ -9,10 +9,12 @@ import (
 	"time"
 
 	"github.com/pingcap/errors"
+	"github.com/pingcap/log"
 	tmysql "github.com/pingcap/tidb/pkg/errno"
 	"github.com/pingcap/tidb/pkg/parser/terror"
 	"github.com/tikv/client-go/v2/tikv"
 	"go.uber.org/multierr"
+	"go.uber.org/zap"
 )
 
 var retryableServerError = []string{
@@ -29,6 +31,7 @@ var retryableServerError = []string{
 	"not read from or written to within the timeout period",
 	"<code>requesttimeout</code>",
 	"<code>invalidpart</code>",
+	"end of file before message length reached",
 }
 
 // RetryableFunc presents a retryable operation.
@@ -76,6 +79,7 @@ func WithRetryV2[T any](
 		if err == nil {
 			return res, nil
 		}
+		log.Info("enter retry", zap.Error(err))
 		allErrors = multierr.Append(allErrors, err)
 		select {
 		case <-ctx.Done():
