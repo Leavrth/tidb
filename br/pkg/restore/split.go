@@ -169,6 +169,10 @@ func (rs *RegionSplitter) executeSplitByRanges(
 				var newRegions []*split.RegionInfo
 				rangeSize := uint64(0)
 				allKeys := make([][]byte, 0, len(ranges))
+				if len(ranges) <= 1 {
+					// we may have splitted in last restore run.
+					return nil
+				}
 				for _, rg := range ranges {
 					rangeSize += rg.Size
 					allKeys = append(allKeys, rg.EndKey)
