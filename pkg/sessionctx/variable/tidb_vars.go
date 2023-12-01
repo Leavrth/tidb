@@ -630,6 +630,9 @@ const (
 	// TiDBEnableClusteredIndex indicates if clustered index feature is enabled.
 	TiDBEnableClusteredIndex = "tidb_enable_clustered_index"
 
+	// TiDBEnableGlobalIndex means if we could create an global index on a partition table or not.
+	TiDBEnableGlobalIndex = "tidb_enable_global_index"
+
 	// TiDBPartitionPruneMode indicates the partition prune mode used.
 	TiDBPartitionPruneMode = "tidb_partition_prune_mode"
 
@@ -893,7 +896,7 @@ const (
 	// TiDBOptOrderingIdxSelThresh is the threshold for optimizer to consider the ordering index.
 	TiDBOptOrderingIdxSelThresh = "tidb_opt_ordering_index_selectivity_threshold"
 
-	// TiDBOptEnableMPPSharedCTEExecution indicates whehter the optimizer try to build shared CTE scan during MPP execution.
+	// TiDBOptEnableMPPSharedCTEExecution indicates whether the optimizer try to build shared CTE scan during MPP execution.
 	TiDBOptEnableMPPSharedCTEExecution = "tidb_opt_enable_mpp_shared_cte_execution"
 	// TiDBOptFixControl makes the user able to control some details of the optimizer behavior.
 	TiDBOptFixControl = "tidb_opt_fix_control"
@@ -1252,6 +1255,7 @@ const (
 	DefTiDBEnableCollectExecutionInfo              = true
 	DefTiDBAllowAutoRandExplicitInsert             = false
 	DefTiDBEnableClusteredIndex                    = ClusteredIndexDefModeOn
+	DefTiDBEnableGlobalIndex                       = false
 	DefTiDBRedactLog                               = false
 	DefTiDBRestrictedReadOnly                      = false
 	DefTiDBSuperReadOnly                           = false
@@ -1264,7 +1268,7 @@ const (
 	DefTiDBEnable1PC                               = false
 	DefTiDBGuaranteeLinearizability                = true
 	DefTiDBAnalyzeVersion                          = 2
-	DefTiDBAutoAnalyzePartitionBatchSize           = 1
+	DefTiDBAutoAnalyzePartitionBatchSize           = 128
 	DefTiDBEnableIndexMergeJoin                    = false
 	DefTiDBTrackAggregateMemoryUsage               = true
 	DefCTEMaxRecursionDepth                        = 1000
