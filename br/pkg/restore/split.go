@@ -613,7 +613,7 @@ func (rs *RegionSplitter) WaitForScatterRegionsTimeout(ctx context.Context, regi
 		}
 
 		if len(reScatterRegions) > 0 {
-			rs.ScatterRegionsSync(ctx1, reScatterRegions)
+			rs.ScatterRegionsAsync(ctx1, reScatterRegions)
 		}
 
 		if time.Since(startTime) > timeout {

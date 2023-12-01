@@ -56,7 +56,7 @@ const (
 const (
 	importScanRegionTime = 10 * time.Second
 	gRPCBackOffMaxDelay  = 3 * time.Second
-	gRPCTimeOut          = 15 * time.Minute
+	gRPCTimeOut          = 60 * time.Minute
 )
 
 // RewriteMode is a mode flag that tells the TiKV how to handle the rewrite rules.
