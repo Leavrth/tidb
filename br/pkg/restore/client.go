@@ -120,6 +120,7 @@ type Client struct {
 	dbPool          []*DB
 	rateLimit       uint64
 	isOnline        bool
+	granularity     string
 	noSchema        bool
 	hasSpeedLimited bool
 
@@ -638,6 +639,16 @@ func (rc *Client) SetConcurrency(c uint) {
 // EnableOnline sets the mode of restore to online.
 func (rc *Client) EnableOnline() {
 	rc.isOnline = true
+}
+
+// SetGranularity sets the ganularity of restore pipeline.
+func (rc *Client) SetGranularity(g string) {
+	rc.granularity = g
+}
+
+// GetGranularity sets the ganularity of restore pipeline.
+func (rc *Client) GetGranularity() string {
+	return rc.granularity
 }
 
 // GetTLSConfig returns the tls config.

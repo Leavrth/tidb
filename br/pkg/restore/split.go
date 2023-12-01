@@ -37,6 +37,13 @@ type retryTimeKey struct{}
 
 var retryTimes = new(retryTimeKey)
 
+type Granularity string
+
+const (
+	FineGrained   Granularity = "fine-grained"
+	CoarseGrained Granularity = "coarse-grained"
+)
+
 type SplitContext struct {
 	isRawKv     bool
 	needScatter bool
@@ -71,6 +78,7 @@ func (rs *RegionSplitter) ExecuteSplit(
 	ranges []rtree.Range,
 	rewriteRules *RewriteRules,
 	storeCount int,
+	granularity string,
 	isRawKv bool,
 	onSplit OnSplitFunc,
 ) error {
@@ -104,7 +112,7 @@ func (rs *RegionSplitter) ExecuteSplit(
 		onSplit:     onSplit,
 		storeCount:  storeCount,
 	}
-	if len(sortedKeys) > 1024 && storeCount > 3 {
+	if granularity == string(CoarseGrained) {
 		return rs.executeSplitByRanges(ctx, sctx, sortedRanges)
 	}
 	return rs.executeSplitByKeys(ctx, sctx, sortedKeys)
@@ -846,7 +854,7 @@ func (helper *LogSplitHelper) splitRegionByPoints(
 				startKey = point
 			}
 
-			return regionSplitter.ExecuteSplit(ctx, ranges, nil, 0, false, func([][]byte) {})
+			return regionSplitter.ExecuteSplit(ctx, ranges, nil, 0, "", false, func([][]byte) {})
 		}
 		select {
 		case <-ctx.Done():
