@@ -258,7 +258,7 @@ func NewTiKVSender(
 
 	sender.wg.Add(2)
 	go sender.splitWorker(ctx, inCh, midCh, splitConcurrency)
-	go sender.holdWorker(ctx, midCh, outCh)
+	go sender.blockPipelineWorker(ctx, midCh, outCh)
 	go sender.restoreWorker(ctx, outCh)
 	return sender, nil
 }
@@ -274,12 +274,12 @@ type drainResultAndDone struct {
 	done   func()
 }
 
-func (b *tikvSender) holdWorker(ctx context.Context,
+func (b *tikvSender) blockPipelineWorker(ctx context.Context,
 	inCh <-chan drainResultAndDone,
 	outCh chan<- drainResultAndDone,
 ) {
 	defer close(outCh)
-	res := make([]drainResultAndDone, 0, 20480)
+	res := make([]drainResultAndDone, 0, defaultChannelSize)
 	for dr := range inCh {
 		res = append(res, dr)
 	}

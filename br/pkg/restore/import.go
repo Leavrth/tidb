@@ -537,6 +537,7 @@ func (importer *FileImporter) ImportSSTFiles(
 		}
 
 		dctx, cancel := context.WithTimeout(ctx, gRPCTimeOut)
+		defer cancel()
 		log.Debug("scan regions", logutil.Files(files), zap.Int("count", len(regionInfos)))
 		// Try to download and ingest the file in every region
 	regionLoop:
@@ -568,7 +569,7 @@ func (importer *FileImporter) ImportSSTFiles(
 					logutil.ShortError(errDownload))
 				return errors.Trace(errDownload)
 			}
-			log.Info("download file done",
+			log.Debug("download file done",
 				zap.String("file-sample", files[0].Name), zap.Stringer("take", time.Since(start)),
 				logutil.Key("start", files[0].StartKey), logutil.Key("end", files[0].EndKey))
 			start = time.Now()
@@ -580,10 +581,9 @@ func (importer *FileImporter) ImportSSTFiles(
 					zap.Error(errIngest))
 				return errors.Trace(errIngest)
 			}
-			log.Info("ingest file done", zap.String("file-sample", files[0].Name), zap.Stringer("take", time.Since(start)))
+			log.Debug("ingest file done", zap.String("file-sample", files[0].Name), zap.Stringer("take", time.Since(start)))
 		}
 
-		// log.Debug("ingest file done", zap.String("file-sample", files[0].Name), zap.Stringer("take", time.Since(start)))
 		for _, f := range files {
 			summary.CollectSuccessUnit(summary.TotalKV, 1, f.TotalKvs)
 			summary.CollectSuccessUnit(summary.TotalBytes, 1, f.TotalBytes)
@@ -883,7 +883,7 @@ func (importer *FileImporter) ingest(
 			if !split.CheckRegionEpoch(newInfo, info) {
 				return errors.Trace(berrors.ErrKVEpochNotMatch)
 			}
-			log.Info("ingest sst returns not leader error, retry it",
+			log.Debug("ingest sst returns not leader error, retry it",
 				logutil.Files(files),
 				logutil.SSTMetas(downloadMetas),
 				logutil.Region(info.Region),

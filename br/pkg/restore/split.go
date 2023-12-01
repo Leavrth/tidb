@@ -18,6 +18,7 @@ import (
 	"github.com/pingcap/kvproto/pkg/pdpb"
 	"github.com/pingcap/log"
 	berrors "github.com/pingcap/tidb/br/pkg/errors"
+	"github.com/pingcap/tidb/br/pkg/lightning/common"
 	"github.com/pingcap/tidb/br/pkg/logutil"
 	"github.com/pingcap/tidb/br/pkg/restore/split"
 	"github.com/pingcap/tidb/br/pkg/rtree"
@@ -526,9 +527,22 @@ func (rs *RegionSplitter) hasHealthyRegion(ctx context.Context, regionID uint64)
 	return len(regionInfo.PendingPeers) == 0, nil
 }
 
+// isScatterRegionFinished check the latest successful operator and return the follow status:
+//
+//	return (finished, needRescatter, error)
+//
+// if the latest operator is not `scatter-operator`, or its status is SUCCESS, it's likely that the
+// scatter region operator is finished.
+//
+// if the latest operator is `scatter-operator` and its status is TIMEOUT or CANCEL, the needRescatter
+// is true and the function caller needs to scatter this region again.
 func (rs *RegionSplitter) isScatterRegionFinished(ctx context.Context, regionID uint64) (bool, bool, error) {
 	resp, err := rs.client.GetOperator(ctx, regionID)
 	if err != nil {
+		if common.IsRetryableError(err) {
+			// retry in the next cycle
+			return false, false, nil
+		}
 		return false, false, errors.Trace(err)
 	}
 	// Heartbeat may not be sent to PD
@@ -601,9 +615,10 @@ func (rs *RegionSplitter) WaitForScatterRegionsTimeout(ctx context.Context, regi
 		interval = 2 * interval
 		if interval > split.ScatterMaxWaitInterval {
 			interval = split.ScatterMaxWaitInterval
-			time.Sleep(interval)
 		}
+		time.Sleep(interval)
 	}
+
 	return len(leftRegions)
 }
 
@@ -1017,7 +1032,9 @@ func (helper *LogSplitHelper) Split(ctx context.Context) error {
 		}
 
 		regionSplitter := NewRegionSplitter(helper.client)
-		regionSplitter.WaitForScatterRegionsTimeout(ctx, scatterRegions, time.Minute)
+		// It is too expensive to stop recovery and wait for a small number of regions
+		// to complete scatter, so the maximum waiting time is reduced to 1 minute.
+		_ = regionSplitter.WaitForScatterRegionsTimeout(ctx, scatterRegions, time.Minute)
 	}()
 
 	iter := helper.iterator()

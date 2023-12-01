@@ -937,7 +937,7 @@ func runRestore(c context.Context, g glue.Glue, cmdName string, cfg *RestoreConf
 		})
 	}
 
-	blockTableStream := GoBlockCreateTablesPipeline(ctx, 1024, tableStream)
+	blockTableStream := GoBlockCreateTablesPipeline(ctx, maxRestoreBatchSizeLimit, tableStream)
 
 	tableFileMap := restore.MapTableToFiles(files)
 	log.Debug("mapped table to files", zap.Any("result map", tableFileMap))

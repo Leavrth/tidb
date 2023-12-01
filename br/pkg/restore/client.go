@@ -349,10 +349,6 @@ func (rc *Client) GetCheckpointRunner() *checkpoint.CheckpointRunner[checkpoint.
 	return rc.checkpointRunner
 }
 
-func (rc *Client) GetRestoreStoreCount() int {
-	return len(rc.restoreStores)
-}
-
 func (rc *Client) StartCheckpointRunnerForLogRestore(ctx context.Context, taskName string) (*checkpoint.CheckpointRunner[checkpoint.LogRestoreKeyType, checkpoint.LogRestoreValueType], error) {
 	runner, err := checkpoint.StartCheckpointRunnerForLogRestore(ctx, rc.storage, rc.cipher, taskName)
 	return runner, errors.Trace(err)
