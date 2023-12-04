@@ -300,7 +300,7 @@ func (rs *RegionSplitter) executeSplitByKeys(
 	if err != nil {
 		return errors.Trace(err)
 	}
-	if splitContext.needScatter {
+	if len(scatterRegions) > 0 {
 		log.Info("finish splitting and scattering regions. and starts to wait", zap.Int("regions", len(scatterRegions)),
 			zap.Duration("take", time.Since(startTime)))
 		rs.waitRegionsScattered(ctx, scatterRegions, split.ScatterWaitUpperInterval)
