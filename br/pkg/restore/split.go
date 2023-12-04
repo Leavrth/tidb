@@ -238,12 +238,15 @@ func (rs *RegionSplitter) executeSplitByKeys(
 	splitContext SplitContext,
 	sortedKeys [][]byte,
 ) error {
+	var mutex sync.Mutex
 	startTime := time.Now()
 	minKey := codec.EncodeBytesExt(nil, sortedKeys[0], splitContext.isRawKv)
 	maxKey := codec.EncodeBytesExt(nil, sortedKeys[len(sortedKeys)-1], splitContext.isRawKv)
 	scatterRegions := make([]*split.RegionInfo, 0)
+	regionsMap := make(map[uint64]*split.RegionInfo)
 
 	err := utils.WithRetry(ctx, func() error {
+		clear(regionsMap)
 		regions, err := split.PaginateScanRegion(ctx, rs.client, minKey, maxKey, split.ScanRegionPaginationLimit)
 		if err != nil {
 			return err
@@ -253,7 +256,6 @@ func (rs *RegionSplitter) executeSplitByKeys(
 		for _, region := range regions {
 			regionMap[region.Region.GetId()] = region
 		}
-		scatterRegionsCh := make(chan []*split.RegionInfo, splitContext.storeCount)
 		workerPool := utils.NewWorkerPool(uint(splitContext.storeCount), "split keys")
 		eg, ectx := errgroup.WithContext(ctx)
 		for regionID, splitKeys := range splitKeyMap {
@@ -275,23 +277,23 @@ func (rs *RegionSplitter) executeSplitByKeys(
 				}
 				if sctx.needScatter {
 					log.Info("scattered regions", zap.Int("count", len(newRegions)))
-					scatterRegionsCh <- newRegions
+					mutex.Lock()
+					for _, r := range newRegions {
+						regionsMap[r.Region.Id] = r
+					}
+					mutex.Unlock()
 				}
 				sctx.onSplit(keys)
 				return nil
 			})
 		}
-		err = eg.Wait()
-		if err != nil {
-			return err
-		}
 		if splitContext.needScatter {
-			for r := range scatterRegionsCh {
+			for _, r := range regionsMap {
 				// merge all scatter regions
-				scatterRegions = append(scatterRegions, r...)
+				scatterRegions = append(scatterRegions, r)
 			}
 		}
-		return nil
+		return eg.Wait()
 	}, newSplitBackoffer())
 	if err != nil {
 		return errors.Trace(err)
