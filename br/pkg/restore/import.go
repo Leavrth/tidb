@@ -723,7 +723,6 @@ func (importer *FileImporter) downloadSST(
 	for _, p := range regionInfo.Region.GetPeers() {
 		peer := p
 		eg.Go(func() error {
-
 			resp, err := importer.importClient.DownloadSST(ectx, peer.GetStoreId(), req)
 			if err != nil {
 				return errors.Trace(err)

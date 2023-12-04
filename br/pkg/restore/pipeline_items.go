@@ -287,7 +287,6 @@ func (b *tikvSender) blockPipelineWorker(ctx context.Context,
 	for _, dr := range res {
 		outCh <- dr
 	}
-
 }
 
 func (b *tikvSender) splitWorker(ctx context.Context,

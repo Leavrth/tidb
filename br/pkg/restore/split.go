@@ -145,26 +145,24 @@ func (rs *RegionSplitter) executeSplitByRanges(
 				break
 			}
 			for {
-				encodeKey := codec.EncodeBytesExt(nil, sortedRanges[sortedIndex].EndKey, splitContext.isRawKv)
-				if bytes.Compare(encodeKey, region.Region.GetEndKey()) < 0 {
-					sortedIndex += 1
-				} else {
-					sortedIndex += 1
-					if sortedIndex > len(sortedRanges) {
-						sortedIndex = len(sortedRanges)
-					}
+				encodeKey := codec.EncodeBytesExt(nil, sortedRanges[sortedIndex].StartKey, splitContext.isRawKv)
+				if bytes.Compare(encodeKey, region.Region.GetEndKey()) >= 0 {
+					//                  start    end
+					// range:            |--------|
+					// region: |---------|
+					// pick up this range due to region end key is exclusive.
 					splitRangeMap[region.Region.GetId()] = sortedRanges[lastSortedIndex:sortedIndex]
 					lastSortedIndex = sortedIndex
 					// reach the region end key and break for next region
 					break
 				}
+				sortedIndex += 1
 				if sortedIndex >= len(sortedRanges) {
 					splitRangeMap[region.Region.GetId()] = sortedRanges[lastSortedIndex:]
 					// has reach the region files' end
 					break loop
 				}
 			}
-
 		}
 
 		workerPool := utils.NewWorkerPool(uint(splitContext.storeCount), "split ranges")
@@ -283,7 +281,10 @@ func (rs *RegionSplitter) executeSplitByKeys(
 				return nil
 			})
 		}
-		eg.Wait()
+		err = eg.Wait()
+		if err != nil {
+			return err
+		}
 		if splitContext.needScatter {
 			for r := range scatterRegionsCh {
 				// merge all scatter regions
@@ -402,7 +403,7 @@ func (rs *RegionSplitter) waitRegionSplitted(ctx context.Context, regionID uint6
 		split.SplitCheckInterval,
 		split.SplitMaxCheckInterval,
 	)
-	utils.WithRetry(ctx, func() error { //nolint: errcheck
+	err := utils.WithRetry(ctx, func() error { //nolint: errcheck
 		ok, err := rs.hasHealthyRegion(ctx, regionID)
 		if err != nil {
 			log.Warn("wait for split failed", zap.Uint64("regionID", regionID), zap.Error(err))
@@ -413,6 +414,9 @@ func (rs *RegionSplitter) waitRegionSplitted(ctx context.Context, regionID uint6
 		}
 		return errors.Annotate(berrors.ErrPDSplitFailed, "wait region splitted failed")
 	}, &state)
+	if err != nil {
+		log.Warn("failed to split regions", logutil.ShortError(err))
+	}
 }
 
 // waitRegionsScattered try to wait mutilple regions scatterd in 3 minutes.
