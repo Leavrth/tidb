@@ -287,13 +287,15 @@ func (rs *RegionSplitter) executeSplitByKeys(
 				return nil
 			})
 		}
-		if splitContext.needScatter {
-			for _, r := range regionsMap {
-				// merge all scatter regions
-				scatterRegions = append(scatterRegions, r)
-			}
+		err = eg.Wait()
+		if err != nil {
+			return err
 		}
-		return eg.Wait()
+		for _, r := range regionsMap {
+			// merge all scatter regions
+			scatterRegions = append(scatterRegions, r)
+		}
+		return nil
 	}, newSplitBackoffer())
 	if err != nil {
 		return errors.Trace(err)
