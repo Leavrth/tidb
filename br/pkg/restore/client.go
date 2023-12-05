@@ -27,7 +27,6 @@ import (
 	"github.com/pingcap/log"
 	"github.com/pingcap/tidb/br/pkg/checkpoint"
 	"github.com/pingcap/tidb/br/pkg/checksum"
-	"github.com/pingcap/tidb/br/pkg/conn"
 	"github.com/pingcap/tidb/br/pkg/conn/util"
 	berrors "github.com/pingcap/tidb/br/pkg/errors"
 	"github.com/pingcap/tidb/br/pkg/glue"
@@ -120,12 +119,10 @@ type Client struct {
 	dbPool          []*DB
 	rateLimit       uint64
 	isOnline        bool
-	granularity     string
 	noSchema        bool
 	hasSpeedLimited bool
 
 	restoreStores []uint64
-	storeCount    int
 
 	cipher             *backuppb.CipherInfo
 	switchModeInterval time.Duration
@@ -460,10 +457,6 @@ func (rc *Client) GetDomain() *domain.Domain {
 	return rc.dom
 }
 
-func (rc *Client) GetStoreCount() int {
-	return rc.storeCount
-}
-
 // GetPDClient returns a pd client.
 func (rc *Client) GetPDClient() pd.Client {
 	return rc.pdClient
@@ -639,16 +632,6 @@ func (rc *Client) SetConcurrency(c uint) {
 // EnableOnline sets the mode of restore to online.
 func (rc *Client) EnableOnline() {
 	rc.isOnline = true
-}
-
-// SetGranularity sets the ganularity of restore pipeline.
-func (rc *Client) SetGranularity(g string) {
-	rc.granularity = g
-}
-
-// GetGranularity sets the ganularity of restore pipeline.
-func (rc *Client) GetGranularity() string {
-	return rc.granularity
 }
 
 // GetTLSConfig returns the tls config.
@@ -2013,13 +1996,16 @@ const (
 
 // LoadRestoreStores loads the stores used to restore data.
 func (rc *Client) LoadRestoreStores(ctx context.Context) error {
+	if !rc.isOnline {
+		return nil
+	}
 	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
 		span1 := span.Tracer().StartSpan("Client.LoadRestoreStores", opentracing.ChildOf(span.Context()))
 		defer span1.Finish()
 		ctx = opentracing.ContextWithSpan(ctx, span1)
 	}
-	stores, err := conn.GetAllTiKVStoresWithRetry(ctx, rc.pdClient, util.SkipTiFlash)
 
+	stores, err := rc.pdClient.GetAllStores(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -2027,16 +2013,12 @@ func (rc *Client) LoadRestoreStores(ctx context.Context) error {
 		if s.GetState() != metapb.StoreState_Up {
 			continue
 		}
-		rc.storeCount++
 		for _, l := range s.GetLabels() {
 			if l.GetKey() == restoreLabelKey && l.GetValue() == restoreLabelValue {
 				rc.restoreStores = append(rc.restoreStores, s.GetId())
 				break
 			}
 		}
-	}
-	if !rc.isOnline {
-		return nil
 	}
 	log.Info("load restore stores", zap.Uint64s("store-ids", rc.restoreStores))
 	return nil

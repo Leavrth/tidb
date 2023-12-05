@@ -293,7 +293,7 @@ func TestScatterFinishInTime(t *testing.T) {
 	regionSplitter := restore.NewRegionSplitter(client)
 
 	ctx := context.Background()
-	err := regionSplitter.ExecuteSplit(ctx, ranges, rewriteRules, 0, "", false, func(key [][]byte) {})
+	err := regionSplitter.Split(ctx, ranges, rewriteRules, false, func(key [][]byte) {})
 	require.NoError(t, err)
 	regions := client.GetAllRegions()
 	if !validateRegions(regions) {
@@ -319,7 +319,7 @@ func TestScatterFinishInTime(t *testing.T) {
 
 	// When using a exponential backoffer, if we try to backoff more than 40 times in 10 regions,
 	// it would cost time unacceptable.
-	regionSplitter.ScatterRegionsSequentially(ctx,
+	regionSplitter.ScatterRegionsWithBackoffer(ctx,
 		regionInfos,
 		assertRetryLessThan(t, 40))
 }
@@ -447,7 +447,7 @@ func runWaitScatter(t *testing.T, client *TestClient) {
 		regions = append(regions, info)
 	}
 	regionSplitter := restore.NewRegionSplitter(client)
-	leftCnt := regionSplitter.WaitForScatterRegionsTimeout(ctx, regions, 2000*time.Second)
+	leftCnt := regionSplitter.WaitForScatterRegions(ctx, regions, 2000*time.Second)
 	require.Equal(t, leftCnt, 0)
 }
 
@@ -457,7 +457,7 @@ func runTestSplitAndScatterWith(t *testing.T, client *TestClient) {
 	regionSplitter := restore.NewRegionSplitter(client)
 
 	ctx := context.Background()
-	err := regionSplitter.ExecuteSplit(ctx, ranges, rewriteRules, 0, "", false, func(key [][]byte) {})
+	err := regionSplitter.Split(ctx, ranges, rewriteRules, false, func(key [][]byte) {})
 	require.NoError(t, err)
 	regions := client.GetAllRegions()
 	if !validateRegions(regions) {
@@ -481,7 +481,7 @@ func runTestSplitAndScatterWith(t *testing.T, client *TestClient) {
 		scattered[regionInfo.Region.Id] = true
 		return nil
 	}
-	regionSplitter.ScatterRegionsSync(ctx, regionInfos)
+	regionSplitter.ScatterRegions(ctx, regionInfos)
 	for key := range regions {
 		if key == alwaysFailedRegionID {
 			require.Falsef(t, scattered[key], "always failed region %d was scattered successfully", key)
@@ -503,7 +503,7 @@ func TestRawSplit(t *testing.T) {
 	ctx := context.Background()
 
 	regionSplitter := restore.NewRegionSplitter(client)
-	err := regionSplitter.ExecuteSplit(ctx, ranges, nil, 0, "", true, func(key [][]byte) {})
+	err := regionSplitter.Split(ctx, ranges, nil, true, func(key [][]byte) {})
 	require.NoError(t, err)
 	regions := client.GetAllRegions()
 	expectedKeys := []string{"", "aay", "bba", "bbh", "cca", ""}
