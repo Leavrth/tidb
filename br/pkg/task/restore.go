@@ -991,7 +991,7 @@ func runRestore(c context.Context, g glue.Glue, cmdName string, cfg *RestoreConf
 		progressLen,
 		!cfg.LogProgress)
 	defer updateCh.Close()
-	sender, err := restore.NewTiKVSender(ctx, client, updateCh, cfg.PDConcurrency)
+	sender, err := restore.NewTiKVSender(ctx, client, updateCh, cfg.PDConcurrency, cfg.Granularity)
 	if err != nil {
 		return errors.Trace(err)
 	}

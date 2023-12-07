@@ -243,10 +243,10 @@ func NewTiKVSender(
 	cli TiKVRestorer,
 	updateCh glue.Progress,
 	splitConcurrency uint,
+	granularity string,
 ) (BatchSender, error) {
 	inCh := make(chan DrainResult, defaultChannelSize)
 	midCh := make(chan drainResultAndDone, defaultChannelSize)
-	outCh := make(chan drainResultAndDone, defaultChannelSize)
 
 	sender := &tikvSender{
 		client:       cli,
@@ -258,8 +258,13 @@ func NewTiKVSender(
 
 	sender.wg.Add(2)
 	go sender.splitWorker(ctx, inCh, midCh, splitConcurrency)
-	go sender.blockPipelineWorker(ctx, midCh, outCh)
-	go sender.restoreWorker(ctx, outCh)
+	if granularity == string(CoarseGrained) {
+		outCh := make(chan drainResultAndDone, defaultChannelSize)
+		go sender.blockPipelineWorker(ctx, midCh, outCh)
+		go sender.restoreWorker(ctx, outCh)
+	} else {
+		go sender.restoreWorker(ctx, midCh)
+	}
 	return sender, nil
 }
 
