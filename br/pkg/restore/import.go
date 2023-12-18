@@ -567,15 +567,13 @@ func (importer *FileImporter) ImportSSTFiles(
 			return errors.Trace(errScanRegion)
 		}
 
-		dctx, cancel := context.WithTimeout(ctx, gRPCTimeOut)
-		defer cancel()
 		log.Debug("scan regions", logutil.Files(files), zap.Int("count", len(regionInfos)))
 		// Try to download and ingest the file in every region
 	regionLoop:
 		for _, regionInfo := range regionInfos {
 			info := regionInfo
 			// Try to download file.
-			downloadMetas, errDownload := importer.download(dctx, info, files, rewriteRules, cipher, apiVersion)
+			downloadMetas, errDownload := importer.download(ctx, info, files, rewriteRules, cipher, apiVersion)
 			if errDownload != nil {
 				for _, e := range multierr.Errors(errDownload) {
 					switch errors.Cause(e) { // nolint:errorlint
@@ -604,7 +602,7 @@ func (importer *FileImporter) ImportSSTFiles(
 				zap.String("file-sample", files[0].Name), zap.Stringer("take", time.Since(start)),
 				logutil.Key("start", files[0].StartKey), logutil.Key("end", files[0].EndKey))
 			start = time.Now()
-			if errIngest := importer.ingest(dctx, files, info, downloadMetas); errIngest != nil {
+			if errIngest := importer.ingest(ctx, files, info, downloadMetas); errIngest != nil {
 				log.Warn("ingest file failed, retry later",
 					logutil.Files(files),
 					logutil.SSTMetas(downloadMetas),
@@ -764,7 +762,9 @@ func (importer *FileImporter) downloadSST(
 			}()
 			_ = <-workerCh
 			atomic.AddInt64(statis, 1)
-			resp, err := importer.importClient.DownloadSST(ectx, peer.GetStoreId(), req)
+			dctx, cancel := context.WithTimeout(ectx, gRPCTimeOut)
+			defer cancel()
+			resp, err := importer.importClient.DownloadSST(dctx, peer.GetStoreId(), req)
 			if err != nil {
 				return errors.Trace(err)
 			}
@@ -877,11 +877,13 @@ func (importer *FileImporter) downloadRawKVSST(
 }
 
 func (importer *FileImporter) ingest(
-	ctx context.Context,
+	c context.Context,
 	files []*backuppb.File,
 	info *split.RegionInfo,
 	downloadMetas []*import_sstpb.SSTMeta,
 ) error {
+	ctx, cancel := context.WithTimeout(c, gRPCTimeOut)
+	defer cancel()
 	for {
 		ingestResp, errIngest := importer.ingestSSTs(ctx, downloadMetas, info)
 		if errIngest != nil {
