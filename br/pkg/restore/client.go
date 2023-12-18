@@ -522,9 +522,25 @@ func (rc *Client) SetStorage(ctx context.Context, backend *backuppb.StorageBacke
 }
 
 func (rc *Client) InitClients(backend *backuppb.StorageBackend, isRawKvMode bool, isTxnKvMode bool) {
+	storeWorkerPoolMap := make(map[uint64]chan struct{})
+	storeStatisticMap := make(map[uint64]*int64)
+	stores, err := conn.GetAllTiKVStoresWithRetry(context.Background(), rc.pdClient, util.SkipTiFlash)
+	if err != nil {
+		log.Fatal("failed to get stores", zap.Error(err))
+	}
+	concurrencyPerStore := 512
+	for _, store := range stores {
+		ch := make(chan struct{}, concurrencyPerStore)
+		for i := 0; i < concurrencyPerStore; i += 1 {
+			ch <- struct{}{}
+		}
+		storeWorkerPoolMap[store.Id] = ch
+		storeStatisticMap[store.Id] = new(int64)
+	}
+
 	metaClient := split.NewSplitClient(rc.pdClient, rc.tlsConf, isRawKvMode)
 	importCli := NewImportClient(metaClient, rc.tlsConf, rc.keepaliveConf)
-	rc.fileImporter = NewFileImporter(metaClient, importCli, backend, isRawKvMode, isTxnKvMode, rc.rewriteMode)
+	rc.fileImporter = NewFileImporter(metaClient, importCli, backend, isRawKvMode, isTxnKvMode, storeWorkerPoolMap, storeStatisticMap, rc.rewriteMode)
 }
 
 func (rc *Client) SetRawKVClient(c *RawKVBatchClient) {
@@ -632,6 +648,7 @@ func (rc *Client) GetFilesInRawRange(startKey []byte, endKey []byte, cf string) 
 
 // SetConcurrency sets the concurrency of dbs tables files.
 func (rc *Client) SetConcurrency(c uint) {
+	c = 102400
 	log.Info("new worker pool", zap.Uint("currency-count", c))
 	rc.workerPool = utils.NewWorkerPool(c, "file")
 }
@@ -1232,7 +1249,7 @@ func MockCallSetSpeedLimit(ctx context.Context, fakeImportClient ImporterClient,
 	rc.SetRateLimit(42)
 	rc.SetConcurrency(concurrency)
 	rc.hasSpeedLimited = false
-	rc.fileImporter = NewFileImporter(nil, fakeImportClient, nil, false, false, rc.rewriteMode)
+	rc.fileImporter = NewFileImporter(nil, fakeImportClient, nil, false, false, nil, nil, rc.rewriteMode)
 	return rc.setSpeedLimit(ctx, rc.rateLimit)
 }
 

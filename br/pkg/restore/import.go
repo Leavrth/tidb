@@ -268,6 +268,10 @@ type FileImporter struct {
 	importClient ImporterClient
 	backend      *backuppb.StorageBackend
 
+	storeWorkerPoolRWLock sync.RWMutex
+	storeWorkerPoolMap    map[uint64]chan struct{}
+	storeStatisticMap     map[uint64]*int64
+
 	kvMode             KvMode
 	rawStartKey        []byte
 	rawEndKey          []byte
@@ -284,6 +288,8 @@ func NewFileImporter(
 	backend *backuppb.StorageBackend,
 	isRawKvMode bool,
 	isTxnKvMode bool,
+	storeWorkerPoolMap map[uint64]chan struct{},
+	storeStatisticMap map[uint64]*int64,
 	rewriteMode RewriteMode,
 ) FileImporter {
 	kvMode := TiDB
@@ -294,13 +300,38 @@ func NewFileImporter(
 		kvMode = Txn
 	}
 	return FileImporter{
-		metaClient:   metaClient,
-		backend:      backend,
-		importClient: importClient,
-		kvMode:       kvMode,
-		rewriteMode:  rewriteMode,
-		cacheKey:     fmt.Sprintf("BR-%s-%d", time.Now().Format("20060102150405"), rand.Int63()),
+		metaClient:         metaClient,
+		backend:            backend,
+		importClient:       importClient,
+		storeStatisticMap:  storeStatisticMap,
+		storeWorkerPoolMap: storeWorkerPoolMap,
+		kvMode:             kvMode,
+		rewriteMode:        rewriteMode,
+		cacheKey:           fmt.Sprintf("BR-%s-%d", time.Now().Format("20060102150405"), rand.Int63()),
 	}
+}
+
+func (importer *FileImporter) InitStatis(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(time.Second * 10)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				currentStatics := make(map[uint64]int64)
+				importer.storeWorkerPoolRWLock.RLock()
+				staticMap := importer.storeStatisticMap
+				for storeID, static := range staticMap {
+					currentStatics[storeID] = atomic.LoadInt64(static)
+				}
+				importer.storeWorkerPoolRWLock.RUnlock()
+				for storeID, static := range currentStatics {
+					log.Info("output the store download static", zap.Uint64("store-id", storeID), zap.Int64("count", static))
+				}
+			}
+		}
+	}()
 }
 
 // CheckMultiIngestSupport checks whether all stores support multi-ingest
@@ -723,6 +754,16 @@ func (importer *FileImporter) downloadSST(
 	for _, p := range regionInfo.Region.GetPeers() {
 		peer := p
 		eg.Go(func() error {
+			importer.storeWorkerPoolRWLock.RLock()
+			workerCh := importer.storeWorkerPoolMap[peer.GetStoreId()]
+			statis := importer.storeStatisticMap[peer.GetStoreId()]
+			defer func() {
+				atomic.AddInt64(statis, 1)
+				workerCh <- struct{}{}
+				importer.storeWorkerPoolRWLock.RUnlock()
+			}()
+			_ = <-workerCh
+			atomic.AddInt64(statis, 1)
 			resp, err := importer.importClient.DownloadSST(ectx, peer.GetStoreId(), req)
 			if err != nil {
 				return errors.Trace(err)
