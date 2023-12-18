@@ -756,15 +756,28 @@ func (importer *FileImporter) downloadSST(
 			workerCh := importer.storeWorkerPoolMap[peer.GetStoreId()]
 			statis := importer.storeStatisticMap[peer.GetStoreId()]
 			defer func() {
-				atomic.AddInt64(statis, 1)
+				atomic.AddInt64(statis, -1)
 				workerCh <- struct{}{}
 				importer.storeWorkerPoolRWLock.RUnlock()
 			}()
 			_ = <-workerCh
 			atomic.AddInt64(statis, 1)
-			dctx, cancel := context.WithTimeout(ectx, gRPCTimeOut)
-			defer cancel()
-			resp, err := importer.importClient.DownloadSST(dctx, peer.GetStoreId(), req)
+
+			var err error
+			var resp *import_sstpb.DownloadResponse
+			for i := 0; i < 5; i += 1 {
+				dctx, cancel := context.WithTimeout(ectx, gRPCTimeOut)
+				resp, err = importer.importClient.DownloadSST(dctx, peer.GetStoreId(), req)
+				cancel()
+				if err != nil {
+					if strings.Contains(err.Error(), "context deadline exceeded") {
+						continue
+					}
+					return errors.Trace(err)
+				}
+
+				break
+			}
 			if err != nil {
 				return errors.Trace(err)
 			}
