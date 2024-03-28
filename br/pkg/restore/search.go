@@ -103,9 +103,7 @@ func (s *StreamBackupSearch) readDataFiles(ctx context.Context, ch chan<- *backu
 				return errors.Trace(err)
 			}
 
-			s.resolveMetaData(egCtx, m, ch)
-			log.Debug("read backup meta file", zap.String("path", path))
-			return nil
+			return s.resolveMetaData(egCtx, m, ch)
 		})
 
 		return nil
@@ -118,7 +116,7 @@ func (s *StreamBackupSearch) readDataFiles(ctx context.Context, ch chan<- *backu
 	return eg.Wait()
 }
 
-func (s *StreamBackupSearch) resolveMetaData(ctx context.Context, metaData *backuppb.Metadata, ch chan<- *backuppb.DataFileInfo) {
+func (s *StreamBackupSearch) resolveMetaData(ctx context.Context, metaData *backuppb.Metadata, ch chan<- *backuppb.DataFileInfo) error {
 	for _, file := range metaData.Files {
 		if file.IsMeta {
 			continue
@@ -143,8 +141,13 @@ func (s *StreamBackupSearch) resolveMetaData(ctx context.Context, metaData *back
 			}
 		}
 
-		ch <- file
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case ch <- file:
+		}
 	}
+	return nil
 }
 
 // Search kv entries from log data files

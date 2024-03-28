@@ -607,7 +607,7 @@ func RunBackup(c context.Context, g glue.Glue, cmdName string, cfg *BackupConfig
 		}
 
 		metawriter.StartWriteMetasAsync(ctx, metautil.AppendDDL)
-		err = backup.WriteBackupDDLJobs(metawriter, g, mgr.GetStorage(), cfg.LastBackupTS, backupTS, needDomain)
+		err = backup.WriteBackupDDLJobs(ctx, metawriter, g, mgr.GetStorage(), cfg.LastBackupTS, backupTS, needDomain)
 		if err != nil {
 			return errors.Trace(err)
 		}

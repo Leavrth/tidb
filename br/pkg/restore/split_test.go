@@ -623,7 +623,7 @@ func TestRestoreFailed(t *testing.T) {
 	sink := assertErrorEmitInTime(dctx, t)
 	sender.PutSink(sink)
 	for _, r := range ranges {
-		sender.RestoreBatch(r)
+		sender.RestoreBatch(context.TODO(), r)
 	}
 	sink.Wait()
 	sink.Close()
@@ -646,7 +646,7 @@ func TestSplitFailed(t *testing.T) {
 	sink := assertErrorEmitInTime(dctx, t)
 	sender.PutSink(sink)
 	for _, r := range ranges {
-		sender.RestoreBatch(r)
+		sender.RestoreBatch(context.TODO(), r)
 	}
 	sink.Wait()
 	sender.Close()

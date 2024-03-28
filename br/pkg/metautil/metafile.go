@@ -250,12 +250,19 @@ func (*MetaReader) ArchiveSize(_ context.Context, files []*backuppb.File) uint64
 
 // ReadDDLs reads the ddls from the backupmeta.
 // This function is compatible with the old backupmeta.
-func (reader *MetaReader) ReadDDLs(ctx context.Context) ([]byte, error) {
+func (reader *MetaReader) ReadDDLs(pctx context.Context) ([]byte, error) {
+	ctx, cancel := context.WithCancel(pctx)
+	defer cancel()
 	var err error
 	ch := make(chan any, MaxBatchSize)
-	errCh := make(chan error)
+	errCh := make(chan error, 1)
 	go func() {
-		if err = reader.readDDLs(ctx, func(s []byte) { ch <- s }); err != nil {
+		if err = reader.readDDLs(ctx, func(s []byte) {
+			select {
+			case <-ctx.Done():
+			case ch <- s:
+			}
+		}); err != nil {
 			errCh <- errors.Trace(err)
 		}
 		close(ch)
@@ -448,7 +455,11 @@ func (reader *MetaReader) ReadSchemasFiles(ctx context.Context, output chan<- *T
 			return nil
 		}
 		for _, table := range tableMap {
-			output <- table
+			select {
+			case <-cctx.Done():
+				return cctx.Err()
+			case output <- table:
+			}
 		}
 	}
 }
@@ -687,8 +698,10 @@ func (writer *MetaWriter) Update(f func(m *backuppb.BackupMeta)) {
 }
 
 // Send sends the item to buffer.
-func (writer *MetaWriter) Send(m any, _ AppendOp) error {
+func (writer *MetaWriter) Send(ctx context.Context, m any, _ AppendOp) error {
 	select {
+	case <-ctx.Done():
+		return ctx.Err()
 	case writer.metasCh <- m:
 	// receive an error from StartWriteMetasAsync
 	case err := <-writer.errCh:

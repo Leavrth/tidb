@@ -160,7 +160,7 @@ func (ss *Schemas) BackupSchemas(
 			if err != nil {
 				return errors.Trace(err)
 			}
-			if err := metaWriter.Send(s, op); err != nil {
+			if err := metaWriter.Send(ectx, s, op); err != nil {
 				return errors.Trace(err)
 			}
 			if updateCh != nil {

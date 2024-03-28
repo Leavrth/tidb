@@ -52,13 +52,15 @@ func newPushDown(mgr ClientMgr, capacity int) *pushDown {
 
 // FullBackup make a full backup of a tikv cluster.
 func (push *pushDown) pushBackup(
-	ctx context.Context,
+	pctx context.Context,
 	req backuppb.BackupRequest,
 	pr *rtree.ProgressRange,
 	stores []*metapb.Store,
 	checkpointRunner *checkpoint.CheckpointRunner[checkpoint.BackupKeyType, checkpoint.BackupValueType],
 	progressCallBack func(ProgressUnit),
 ) error {
+	ctx, cancel := context.WithCancel(pctx)
+	defer cancel()
 	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
 		span1 := span.Tracer().StartSpan("pushDown.pushBackup", opentracing.ChildOf(span.Context()))
 		defer span1.Finish()
@@ -95,9 +97,13 @@ func (push *pushDown) pushBackup(
 				lctx, storeID, client, req,
 				func(resp *backuppb.BackupResponse) error {
 					// Forward all responses (including error).
-					push.respCh <- responseAndStore{
+					select {
+					case <-lctx.Done():
+						return lctx.Err()
+					case push.respCh <- responseAndStore{
 						Resp:  resp,
 						Store: store,
+					}:
 					}
 					return nil
 				},
@@ -107,7 +113,10 @@ func (push *pushDown) pushBackup(
 				})
 			// Disconnected stores can be ignored.
 			if err != nil {
-				push.errCh <- err
+				select {
+				case push.errCh <- err:
+				default:
+				}
 				return
 			}
 		}()

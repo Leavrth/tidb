@@ -1034,7 +1034,10 @@ func (rc *Client) GoCreateTables(
 			close(outCh)
 			return outCh
 		} else if !utils.FallBack2CreateTable(err) {
-			errCh <- err
+			select {
+			case <-ctx.Done():
+			case errCh <- err:
+			}
 			close(outCh)
 			return outCh
 		}
@@ -1060,7 +1063,11 @@ func (rc *Client) GoCreateTables(
 			zap.Int("output chan size", len(outCh)),
 			zap.Stringer("table", t.Info.Name),
 			zap.Stringer("database", t.DB.Name))
-		outCh <- rt
+		select {
+		case <-c.Done():
+			return c.Err()
+		case outCh <- rt:
+		}
 		rater.Inc()
 		rater.L().Info("table created",
 			zap.Stringer("table", t.Info.Name),
@@ -1077,7 +1084,10 @@ func (rc *Client) GoCreateTables(
 			err = rc.createTablesWithSoleDB(ctx, createOneTable, tables)
 		}
 		if err != nil {
-			errCh <- err
+			select {
+			case <-ctx.Done():
+			case errCh <- err:
+			}
 		}
 	}()
 
@@ -1138,7 +1148,11 @@ func (rc *Client) createTablesInWorkerPool(ctx context.Context, dom *domain.Doma
 					zap.Int("output chan size", len(outCh)),
 					zap.Stringer("table", ct.OldTable.Info.Name),
 					zap.Stringer("database", ct.OldTable.DB.Name))
-				outCh <- ct
+				select {
+				case <-ectx.Done():
+					return context.Cause(ectx)
+				case outCh <- ct:
+				}
 				rater.Inc()
 				rater.L().Info("table created",
 					zap.Stringer("table", ct.OldTable.Info.Name),
@@ -1747,7 +1761,11 @@ func concurrentHandleTablesCh(
 				if err != nil {
 					return err
 				}
-				outCh <- cloneTable
+				select {
+				case <-ectx.Done():
+					return context.Cause(ectx)
+				case outCh <- cloneTable:
+				}
 				return nil
 			})
 		}

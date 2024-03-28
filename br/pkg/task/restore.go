@@ -965,7 +965,7 @@ func runRestore(c context.Context, g glue.Glue, cmdName string, cfg *RestoreConf
 	}
 
 	// We make bigger errCh so we won't block on multi-part failed.
-	errCh := make(chan error, 32)
+	errCh := make(chan error, 64)
 
 	tableStream := client.GoCreateTables(ctx, mgr.GetDomain(), tables, newTS, errCh)
 
@@ -1247,7 +1247,7 @@ func restoreTableStream(
 	oldTableCount := 0
 	defer func() {
 		// when things done, we must clean pending requests.
-		batcher.Close()
+		batcher.Close(ctx)
 		log.Info("doing postwork",
 			zap.Int("table count", oldTableCount),
 		)

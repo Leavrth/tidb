@@ -87,12 +87,19 @@ func (b *Batcher) contextCleaner(ctx context.Context, tables <-chan []CreatedTab
 				return
 			}
 			if err := b.manager.Leave(ctx, tbls); err != nil {
-				b.sendErr <- err
+				select {
+				case <-ctx.Done():
+				case b.sendErr <- err:
+				}
 				return
 			}
 			for _, tbl := range tbls {
 				cloneTable := tbl
-				b.outCh <- &cloneTable
+				select {
+				case <-ctx.Done():
+					return
+				case b.outCh <- &cloneTable:
+				}
 			}
 		}
 	}
@@ -147,8 +154,8 @@ func (b *Batcher) EnableAutoCommit(ctx context.Context, delay time.Duration) {
 
 // DisableAutoCommit blocks the current goroutine until the worker can gracefully stop,
 // and then disable auto commit.
-func (b *Batcher) DisableAutoCommit() {
-	b.joinAutoCommitWorker()
+func (b *Batcher) DisableAutoCommit(ctx context.Context) {
+	b.joinAutoCommitWorker(ctx)
 	b.autoCommitJoiner = nil
 }
 
@@ -159,10 +166,13 @@ func (b *Batcher) waitUntilSendDone() {
 
 // joinAutoCommitWorker blocks the current goroutine until the worker can gracefully stop.
 // return immediately when auto commit disabled.
-func (b *Batcher) joinAutoCommitWorker() {
+func (b *Batcher) joinAutoCommitWorker(ctx context.Context) {
 	if b.autoCommitJoiner != nil {
 		log.Debug("gracefully stopping worker goroutine")
-		b.autoCommitJoiner <- struct{}{}
+		select {
+		case <-ctx.Done():
+		case b.autoCommitJoiner <- struct{}{}:
+		}
 		close(b.autoCommitJoiner)
 		log.Debug("gracefully stopped worker goroutine")
 	}
@@ -201,7 +211,6 @@ func (b *Batcher) autoCommitWorker(ctx context.Context, joiner <-chan struct{}, 
 			log.Debug("graceful stop signal received")
 			return
 		case <-ctx.Done():
-			b.sendErr <- ctx.Err()
 			return
 		case <-tick.C:
 			if b.Len() > 0 {
@@ -403,10 +412,13 @@ func (b *Batcher) Send(ctx context.Context) {
 	log.Info("restore batch start", rtree.ZapRanges(ranges), ZapTables(tbs))
 	// Leave is called at b.contextCleaner
 	if err := b.manager.Enter(ctx, drainResult.TablesToSend); err != nil {
-		b.sendErr <- err
+		select {
+		case <-ctx.Done():
+		case b.sendErr <- err:
+		}
 		return
 	}
-	b.sender.RestoreBatch(drainResult)
+	b.sender.RestoreBatch(ctx, drainResult)
 }
 
 func (b *Batcher) sendIfFull() {
@@ -435,9 +447,9 @@ func (b *Batcher) Add(tbs TableWithRange) {
 }
 
 // Close closes the batcher, sending all pending requests, close updateCh.
-func (b *Batcher) Close() {
+func (b *Batcher) Close(ctx context.Context) {
 	log.Info("sending batch lastly on close", zap.Int("size", b.Len()))
-	b.DisableAutoCommit()
+	b.DisableAutoCommit(ctx)
 	b.waitUntilSendDone()
 	close(b.outCh)
 	close(b.sendCh)

@@ -263,15 +263,20 @@ func (recovery *Recovery) ReadRegionMeta(ctx context.Context) error {
 				}
 			}
 
-			metaChan <- storeMeta
+			select {
+			case <-ectx.Done():
+				return context.Cause(ectx)
+			case metaChan <- storeMeta:
+			}
 			return nil
 		})
 	}
 
+LOOPSTORES:
 	for i := 0; i < totalStores; i++ {
 		select {
 		case <-ectx.Done(): // err or cancel, eg.wait will catch the error
-			break
+			break LOOPSTORES
 		case storeMeta := <-metaChan:
 			recovery.StoreMetas[i] = storeMeta
 			log.Info("received region meta from", zap.Int("store", int(storeMeta.StoreId)))

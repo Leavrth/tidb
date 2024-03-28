@@ -196,7 +196,7 @@ type BatchSender interface {
 	// call this function at least once before first call to `RestoreBatch`.
 	PutSink(sink TableSink)
 	// RestoreBatch will send the restore request.
-	RestoreBatch(ranges DrainResult)
+	RestoreBatch(ctx context.Context, ranges DrainResult)
 	Close()
 }
 
@@ -235,9 +235,13 @@ func (b *tikvSender) PutSink(sink TableSink) {
 	b.sink = sink
 }
 
-func (b *tikvSender) RestoreBatch(ranges DrainResult) {
+func (b *tikvSender) RestoreBatch(ctx context.Context, ranges DrainResult) {
 	log.Info("restore batch: waiting ranges", zap.Int("range", len(b.inCh)))
-	b.inCh <- ranges
+	select {
+	case <-ctx.Done():
+		log.Warn("restore batch: skip sending ranges", zap.Error(ctx.Err()))
+	case b.inCh <- ranges:
+	}
 }
 
 // NewTiKVSender make a sender that send restore requests to TiKV.

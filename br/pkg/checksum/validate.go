@@ -30,7 +30,7 @@ func FastChecksum(
 	}()
 
 	ch := make(chan *metautil.Table)
-	errCh := make(chan error)
+	errCh := make(chan error, 1)
 	go func() {
 		reader := metautil.NewMetaReader(backupMeta, storage, cipher)
 		if err := reader.ReadSchemasFiles(ctx, ch, metautil.SkipStats); err != nil {

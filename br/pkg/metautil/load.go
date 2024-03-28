@@ -40,7 +40,7 @@ func (db *Database) GetTable(name string) *Table {
 // LoadBackupTables loads schemas from BackupMeta.
 func LoadBackupTables(ctx context.Context, reader *MetaReader, loadStats bool) (map[string]*Database, error) {
 	ch := make(chan *Table)
-	errCh := make(chan error)
+	errCh := make(chan error, 1)
 	go func() {
 		var opts []ReadSchemaOption
 		if !loadStats {

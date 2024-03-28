@@ -34,7 +34,7 @@ func (sender *drySender) PutSink(sink restore.TableSink) {
 	sender.sink = sink
 }
 
-func (sender *drySender) RestoreBatch(ranges restore.DrainResult) {
+func (sender *drySender) RestoreBatch(ctx context.Context, ranges restore.DrainResult) {
 	sender.mu.Lock()
 	defer sender.mu.Unlock()
 	log.Info("fake restore range", rtree.ZapRanges(ranges.Ranges))
@@ -218,7 +218,7 @@ func TestBasic(t *testing.T) {
 		batcher.Add(tbl)
 	}
 
-	batcher.Close()
+	batcher.Close(ctx)
 	rngs := sender.Ranges()
 
 	require.Equal(t, rngs, join(tableRanges))
@@ -249,7 +249,7 @@ func TestAutoSend(t *testing.T) {
 	require.Greater(t, sender.RangeLen(), 0)
 	require.Equal(t, 0, batcher.Len())
 
-	batcher.Close()
+	batcher.Close(ctx)
 
 	rngs := sender.Ranges()
 	require.Equal(t, simpleTable.Range, rngs)
@@ -276,7 +276,7 @@ func TestSplitRangeOnSameTable(t *testing.T) {
 	})
 
 	batcher.Add(simpleTable)
-	batcher.Close()
+	batcher.Close(ctx)
 	require.Equal(t, 4, sender.BatchCount())
 
 	rngs := sender.Ranges()
@@ -331,7 +331,7 @@ func TestRewriteRules(t *testing.T) {
 	require.Equal(t, 2, sender.RangeLen())
 
 	batcher.Add(tables[2])
-	batcher.Close()
+	batcher.Close(ctx)
 	require.True(t, sender.HasRewriteRuleOfKey("c"))
 	require.Equal(t, join(tableRanges), sender.Ranges())
 
@@ -375,7 +375,7 @@ func TestBatcherLen(t *testing.T) {
 	require.Equal(t, 1, batcher.Len())
 	require.True(t, manager.Has(simpleTable2))
 	require.False(t, manager.Has(simpleTable))
-	batcher.Close()
+	batcher.Close(ctx)
 	require.Equal(t, 0, batcher.Len())
 
 	select {

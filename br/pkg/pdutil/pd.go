@@ -335,7 +335,11 @@ func (p *PdController) ResumeSchedulers(ctx context.Context, schedulers []string
 
 func (p *PdController) resumeSchedulerWith(ctx context.Context, schedulers []string) (err error) {
 	log.Info("resume scheduler", zap.Strings("schedulers", schedulers))
-	p.schedulerPauseCh <- struct{}{}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case p.schedulerPauseCh <- struct{}{}:
+	}
 
 	// 0 means stop pause.
 	delay := int64(0)

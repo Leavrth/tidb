@@ -767,7 +767,7 @@ func skipUnsupportedDDLJob(job *model.Job) bool {
 }
 
 // WriteBackupDDLJobs sends the ddl jobs are done in (lastBackupTS, backupTS] to metaWriter.
-func WriteBackupDDLJobs(metaWriter *metautil.MetaWriter, g glue.Glue, store kv.Storage, lastBackupTS, backupTS uint64, needDomain bool) error {
+func WriteBackupDDLJobs(ctx context.Context, metaWriter *metautil.MetaWriter, g glue.Glue, store kv.Storage, lastBackupTS, backupTS uint64, needDomain bool) error {
 	snapshot := store.GetSnapshot(kv.NewVersion(backupTS))
 	snapMeta := meta.NewSnapshotMeta(snapshot)
 	lastSnapshot := store.GetSnapshot(kv.NewVersion(lastBackupTS))
@@ -826,7 +826,7 @@ func WriteBackupDDLJobs(metaWriter *metautil.MetaWriter, g glue.Glue, store kv.S
 			if err != nil {
 				return errors.Trace(err)
 			}
-			err = metaWriter.Send(jobBytes, metautil.AppendDDL)
+			err = metaWriter.Send(ctx, jobBytes, metautil.AppendDDL)
 			if err != nil {
 				return errors.Trace(err)
 			}
@@ -995,7 +995,7 @@ func (bc *Client) BackupRange(
 		}
 		// we need keep the files in order after we support multi_ingest sst.
 		// default_sst and write_sst need to be together.
-		if err := metaWriter.Send(r.Files, metautil.AppendDataFile); err != nil {
+		if err := metaWriter.Send(ctx, r.Files, metautil.AppendDataFile); err != nil {
 			ascendErr = err
 			return false
 		}
@@ -1106,12 +1106,14 @@ func (bc *Client) FindTargetPeer(ctx context.Context, key []byte, isRawKv bool, 
 }
 
 func (bc *Client) fineGrainedBackup(
-	ctx context.Context,
+	pctx context.Context,
 	req backuppb.BackupRequest,
 	targetStoreIds map[uint64]struct{},
 	pr *rtree.ProgressRange,
 	progressCallBack func(ProgressUnit),
 ) error {
+	ctx, cancel := context.WithCancel(pctx)
+	defer cancel()
 	if span := opentracing.SpanFromContext(ctx); span != nil && span.Tracer() != nil {
 		span1 := span.Tracer().StartSpan("Client.fineGrainedBackup", opentracing.ChildOf(span.Context()))
 		defer span1.Finish()
@@ -1169,8 +1171,13 @@ func (bc *Client) fineGrainedBackup(
 
 		// Dispatch rangs and wait
 		go func() {
+		INCOMPLETE_LOOP:
 			for _, rg := range incomplete {
-				retry <- rg
+				select {
+				case <-ctx.Done():
+					break INCOMPLETE_LOOP
+				case retry <- rg:
+				}
 			}
 			close(retry)
 			wg.Wait()
@@ -1310,7 +1317,11 @@ func (bc *Client) handleFineGrained(
 				backoffMill = shouldBackoff
 			}
 			if response != nil {
-				respCh <- response
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case respCh <- response:
+				}
 			}
 			// When meet an error, we need to set hasProgress too, in case of
 			// overriding the backoffTime of original error.
