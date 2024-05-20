@@ -245,7 +245,14 @@ func onCreateTables(d *ddlCtx, t *meta.Meta, job *model.Job) (int64, error) {
 	for i := range args {
 		stubJob.TableID = args[i].ID
 		stubJob.Args[0] = args[i]
-		tbInfo, err := createTable(d, t, stubJob, fkCheck)
+		var tbInfo *model.TableInfo
+		var err error
+		if stubJob.Args[0].(*model.TableInfo).Sequence == nil {
+			tbInfo, err = createTable(d, t, stubJob, fkCheck)
+		} else {
+			ver, err = onCreateSequence(d, t, stubJob)
+		}
+
 		if err != nil {
 			job.State = model.JobStateCancelled
 			return ver, errors.Trace(err)

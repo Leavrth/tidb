@@ -3004,7 +3004,8 @@ func (d *ddl) BatchCreateTableWithInfo(ctx sessionctx.Context,
 		}
 	}
 
-	return nil
+	err = d.callHookOnChanged(jobs, err)
+	return errors.Trace(err)
 }
 
 // BatchCreateTableWithJobs combine CreateTableJobs to BatchCreateTableJob.
