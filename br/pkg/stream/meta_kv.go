@@ -262,3 +262,10 @@ func (v *RawWriteCFValue) EncodeTo() []byte {
 	}
 	return data
 }
+
+func FakeRawWriteCFValue(startTs uint64) *RawWriteCFValue {
+	return &RawWriteCFValue{
+		t:       WriteTypePut,
+		startTs: startTs,
+	}
+}
