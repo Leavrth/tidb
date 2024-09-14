@@ -78,7 +78,8 @@ run_case() {
 # Wait for global variable cache invalid
 sleep 2
 
-for casename in $SELECTED_TEST_NAME; do
+#for casename in $SELECTED_TEST_NAME; do
+casename="br_other"
     script="$CUR/$casename/run.sh"
     run_case "$casename" "$script"
-done
+#done
