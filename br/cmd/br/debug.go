@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"path"
 	"reflect"
+	"slices"
 
 	"github.com/gogo/protobuf/proto"
 	"github.com/pingcap/errors"
@@ -27,8 +28,11 @@ import (
 	"github.com/pingcap/tidb/br/pkg/task"
 	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/br/pkg/version/build"
+	"github.com/pingcap/tidb/pkg/distsql"
+	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/meta/model"
 	tidblogutil "github.com/pingcap/tidb/pkg/util/logutil"
+	"github.com/pingcap/tidb/pkg/util/ranger"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 )
@@ -57,6 +61,7 @@ func NewDebugCommand() *cobra.Command {
 	meta.AddCommand(encodeBackupMetaCommand())
 	meta.AddCommand(setPDConfigCommand())
 	meta.AddCommand(searchStreamBackupCommand())
+	meta.AddCommand(searchBackupRangeSSTCommand())
 	meta.Hidden = true
 
 	return meta
@@ -476,4 +481,133 @@ func searchStreamBackupCommand() *cobra.Command {
 	flags.Uint64("end-ts", 0, "search to end TSO, default is no end TSO limit")
 
 	return searchBackupCMD
+}
+
+func searchBackupRangeSSTCommand() *cobra.Command {
+	searchBackupRangeSSTCMD := &cobra.Command{
+		Use:   "search-backup-range-sst",
+		Short: "search backup range",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, cancel := context.WithCancel(GetDefaultContext())
+			defer cancel()
+
+			dbName, err := cmd.Flags().GetString("db")
+			if err != nil {
+				return errors.Trace(err)
+			}
+			if len(dbName) == 0 {
+				return errors.New("database name can't be empty")
+			}
+			tableName, err := cmd.Flags().GetString("table")
+			if err != nil {
+				return errors.Trace(err)
+			}
+			if len(tableName) == 0 {
+				return errors.New("table name can't be empty")
+			}
+			partitionName, err := cmd.Flags().GetString("partition")
+			if err != nil {
+				return errors.Trace(err)
+			}
+			indexName, err := cmd.Flags().GetString("index")
+			if err != nil {
+				return errors.Trace(err)
+			}
+			var cfg task.Config
+			if err = cfg.ParseFromFlags(cmd.Flags()); err != nil {
+				return errors.Trace(err)
+			}
+			_, s, backupMeta, err := task.ReadBackupMeta(ctx, metautil.MetaFile, &cfg)
+			if err != nil {
+				log.Error("read backupmeta failed", zap.Error(err))
+				return errors.Trace(err)
+			}
+			reader := metautil.NewMetaReader(backupMeta, s, &cfg.CipherInfo)
+			dbs, err := metautil.LoadBackupTables(ctx, reader, false)
+			if err != nil {
+				log.Error("load tables failed", zap.Error(err))
+				return errors.Trace(err)
+			}
+			db, exists := dbs[dbName]
+			if !exists {
+				return errors.Errorf("cannot find the database %s in the backupmeta", dbName)
+			}
+			tblIdx := slices.IndexFunc(db.Tables, func(tbl *metautil.Table) bool {
+				return tbl.Info.Name.O == tableName
+			})
+			if tblIdx < 0 {
+				return errors.Errorf("cannot find the table %s in the backupmeta", tableName)
+			}
+			metaTableInfo := db.Tables[tblIdx].Info
+
+			if (len(partitionName) > 0) == (metaTableInfo.Partition == nil) {
+				return errors.Errorf("partitionName parameter %s does not match the table partition %v",
+					partitionName, db.Tables[tblIdx].Info.Partition)
+			}
+
+			tblID := metaTableInfo.ID
+			if len(partitionName) > 0 {
+				pIdx := slices.IndexFunc(metaTableInfo.Partition.Definitions,
+					func(def model.PartitionDefinition) bool {
+						return def.Name.O == partitionName
+					})
+				if pIdx < 0 {
+					return errors.Errorf("cannot find the partition %s in the table %s", partitionName, tableName)
+				}
+				tblID = metaTableInfo.Partition.Definitions[pIdx].ID
+			}
+
+			// copied from pkg/distsql: appendRanges
+			retRanges := make([]kv.KeyRange, 0, 1)
+			if len(indexName) > 0 {
+				indexIdx := slices.IndexFunc(metaTableInfo.Indices,
+					func(idx *model.IndexInfo) bool {
+						return idx.Name.O == indexName
+					})
+				if indexIdx < 0 {
+					return errors.Errorf("cannot find the index %s in the table %s", indexName, tableName)
+				}
+				if metaTableInfo.Indices[indexIdx].State != model.StatePublic {
+					return errors.Errorf("index %s is not public", indexName)
+				}
+				idxRanges, err := distsql.IndexRangesToKVRanges(nil, tblID, metaTableInfo.Indices[indexIdx].ID, ranger.FullRange())
+				if err != nil {
+					return errors.Trace(err)
+				}
+				retRanges = idxRanges.AppendSelfTo(retRanges)
+			} else {
+				var ranges []*ranger.Range
+				if db.Tables[tblIdx].Info.IsCommonHandle {
+					ranges = ranger.FullNotNullRange()
+				} else {
+					ranges = ranger.FullIntRange(false)
+				}
+				kvRanges, err := distsql.TableHandleRangesToKVRanges(nil, []int64{tblID}, metaTableInfo.IsCommonHandle, ranges)
+				if err != nil {
+					return errors.Trace(err)
+				}
+				retRanges = kvRanges.AppendSelfTo(retRanges)
+			}
+
+			for _, retRange := range retRanges {
+				log.Info("search the SST overlap with key", logutil.Key("start", retRange.StartKey), logutil.Key("end", retRange.EndKey))
+				for _, file := range db.Tables[tblIdx].Files {
+					if bytes.Compare(file.StartKey, retRange.EndKey) >= 0 || bytes.Compare(file.EndKey, retRange.StartKey) <= 0 {
+						continue
+					}
+					log.Info("get sst file name", zap.String("sst file name", file.Name))
+				}
+			}
+			return nil
+		},
+	}
+
+	flags := searchBackupRangeSSTCMD.Flags()
+	flags.String("db", "", "database name of the backup range")
+	flags.String("table", "", "table name of the backup range")
+	flags.String("partition", "", "(optional) partition name of the backup range")
+	flags.String("index", "", "(optional) index name of the backup range")
+
+	return searchBackupRangeSSTCMD
 }
