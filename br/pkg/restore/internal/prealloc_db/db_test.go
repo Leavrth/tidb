@@ -228,7 +228,7 @@ func cloneTableInfos(
 			})
 		}
 
-		ids = prealloctableid.New(tableInfos)
+		ids = prealloctableid.New(tableInfos, 0)
 		return ids.Alloc(allocater)
 	})
 	require.NoError(t, err)

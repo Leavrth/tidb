@@ -138,6 +138,31 @@ func isUnrecoverableTable(schemaName string, tableName string) bool {
 	return ok
 }
 
+func IsStatsTemporaryTable(tempSchemaName string, tableName string) bool {
+	if name, ok := utils.StripTempDBPrefixIfNeeded(tempSchemaName); utils.IsSysDB(name) && ok {
+		return isStatsTable(name, tableName)
+	}
+	return false
+}
+
+type MoveStatsTableSQLPairT struct {
+	DropSQL   string
+	RenameSQL string
+}
+
+func GenerateMoveStatsTableSQLPair(tempSchemaName string, tableName string) *MoveStatsTableSQLPairT {
+	if dbName, ok := utils.StripTempDBPrefixIfNeeded(tempSchemaName); utils.IsSysDB(dbName) && ok {
+		if isStatsTable(dbName, tableName) {
+			return &MoveStatsTableSQLPairT{
+				DropSQL: fmt.Sprintf("DROP TABLE IF EXISTS %s;", utils.EncloseDBAndTable(dbName, tableName)),
+				RenameSQL: fmt.Sprintf("RENAME TABLE %s TO %s;",
+					utils.EncloseDBAndTable(tempSchemaName, tableName), utils.EncloseDBAndTable(dbName, tableName)),
+			}
+		}
+	}
+	return nil
+}
+
 func isStatsTable(schemaName string, tableName string) bool {
 	tableMap, ok := statsTables[schemaName]
 	if !ok {

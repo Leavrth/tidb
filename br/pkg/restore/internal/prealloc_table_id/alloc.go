@@ -7,6 +7,7 @@ import (
 	"math"
 
 	"github.com/pingcap/tidb/br/pkg/metautil"
+	"github.com/pingcap/tidb/br/pkg/utils"
 	"github.com/pingcap/tidb/pkg/meta/model"
 )
 
@@ -21,6 +22,28 @@ const (
 	insaneTableIDThreshold = math.MaxUint32
 )
 
+func MaxSysTableID(databases map[string]*metautil.Database) int64 {
+	maxSysTableID := int64(0)
+	for _, database := range databases {
+		if utils.IsTemplateSysDB(database.Info.Name) {
+			for _, table := range database.Tables {
+				if table.Info.ID > maxSysTableID && table.Info.ID < insaneTableIDThreshold {
+					maxSysTableID = table.Info.ID
+				}
+
+				if table.Info.Partition != nil && table.Info.Partition.Definitions != nil {
+					for _, part := range table.Info.Partition.Definitions {
+						if part.ID > maxSysTableID && part.ID < insaneTableIDThreshold {
+							maxSysTableID = part.ID
+						}
+					}
+				}
+			}
+		}
+	}
+	return maxSysTableID
+}
+
 // Allocator is the interface needed to allocate table IDs.
 type Allocator interface {
 	GetGlobalID() (int64, error)
@@ -32,11 +55,13 @@ type PreallocIDs struct {
 	end int64
 
 	allocedFrom int64
+
+	minUserTableID int64
 }
 
 // New collects the requirement of prealloc IDs and return a
 // not-yet-allocated PreallocIDs.
-func New(tables []*metautil.Table) *PreallocIDs {
+func New(tables []*metautil.Table, maxSysTableID int64) *PreallocIDs {
 	if len(tables) == 0 {
 		return &PreallocIDs{
 			allocedFrom: math.MaxInt64,
@@ -44,17 +69,29 @@ func New(tables []*metautil.Table) *PreallocIDs {
 	}
 
 	maxv := int64(0)
+	minv := int64(math.MaxInt64)
 
 	for _, t := range tables {
-		if t.Info.ID > maxv && t.Info.ID < insaneTableIDThreshold {
-			maxv = t.Info.ID
+		if t.Info.ID < insaneTableIDThreshold {
+			if t.Info.ID > maxv {
+				maxv = t.Info.ID
+			}
+			if t.Info.ID < minv && t.Info.ID > maxSysTableID {
+				minv = t.Info.ID
+			}
 		}
 
 		if t.Info.Partition != nil && t.Info.Partition.Definitions != nil {
 			for _, part := range t.Info.Partition.Definitions {
-				if part.ID > maxv && part.ID < insaneTableIDThreshold {
-					maxv = part.ID
+				if part.ID < insaneTableIDThreshold {
+					if part.ID > maxv {
+						maxv = part.ID
+					}
+					if part.ID < minv && part.ID > maxSysTableID {
+						minv = part.ID
+					}
 				}
+
 			}
 		}
 	}
@@ -62,6 +99,8 @@ func New(tables []*metautil.Table) *PreallocIDs {
 		end: maxv + 1,
 
 		allocedFrom: math.MaxInt64,
+
+		minUserTableID: minv,
 	}
 }
 
@@ -71,6 +110,10 @@ func (p *PreallocIDs) String() string {
 		return fmt.Sprintf("ID:empty(end=%d)", p.end)
 	}
 	return fmt.Sprintf("ID:[%d,%d)", p.allocedFrom, p.end)
+}
+
+func (p *PreallocIDs) AllUserTableIDReused() bool {
+	return p.allocedFrom <= p.minUserTableID
 }
 
 // preallocTableIDs peralloc the id for [start, end)
