@@ -293,14 +293,21 @@ func (rc *SnapClient) SetPlacementPolicyMode(withPlacementPolicy string) {
 
 // AllocTableIDs would pre-allocate the table's origin ID if exists, so that the TiKV doesn't need to rewrite the key in
 // the download stage.
-func (rc *SnapClient) AllocTableIDs(ctx context.Context, tables []*metautil.Table) error {
-	preallocedTableIDs := tidalloc.New(tables)
+func (rc *SnapClient) AllocTableIDs(ctx context.Context, tables []*metautil.Table, mustUserTableIDReused bool) error {
+	maxSysTableID := int64(0)
+	if mustUserTableIDReused {
+		maxSysTableID = tidalloc.MaxSysTableID(rc.databases)
+	}
+	preallocedTableIDs := tidalloc.New(tables, maxSysTableID)
 	ctx = kv.WithInternalSourceType(ctx, kv.InternalTxnBR)
 	err := kv.RunInNewTxn(ctx, rc.GetDomain().Store(), true, func(_ context.Context, txn kv.Transaction) error {
 		return preallocedTableIDs.Alloc(meta.NewMutator(txn))
 	})
 	if err != nil {
 		return err
+	}
+	if mustUserTableIDReused && !preallocedTableIDs.AllUserTableIDReused() {
+		return errors.Errorf("cannot load stats physically because not all table ids are reused")
 	}
 
 	log.Info("registering the table IDs", zap.Stringer("ids", preallocedTableIDs))
