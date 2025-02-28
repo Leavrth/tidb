@@ -102,7 +102,7 @@ func TestAllocator(t *testing.T) {
 			tables = append(tables, &table)
 		}
 
-		ids := prealloctableid.New(tables)
+		ids := prealloctableid.New(tables, 0)
 		allocator := testAllocator(c.hasAllocatedTo)
 		require.NoError(t, ids.Alloc(&allocator))
 		require.Equal(t, c.msg, ids.String())

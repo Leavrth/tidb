@@ -77,9 +77,10 @@ func ExhaustErrors(ec <-chan error) []error {
 
 type PipelineContext struct {
 	// pipeline item switch
-	Checksum         bool
-	LoadStats        bool
-	WaitTiflashReady bool
+	Checksum          bool
+	LoadStats         bool
+	LoadStatsPhysical bool
+	WaitTiflashReady  bool
 
 	// pipeline item configuration
 	LogProgress         bool
@@ -98,20 +99,27 @@ func (rc *SnapClient) RestorePipeline(ctx context.Context, plCtx PipelineContext
 	defer func() {
 		summary.CollectDuration("restore pipeline", time.Since(start))
 	}()
-	// We make bigger errCh so we won't block on multi-part failed.
-	errCh := make(chan error, 32)
-	postHandleCh := afterTableRestoredCh(ctx, createdTables)
-	progressLen := int64(0)
+	progressRatio := 0
 	if plCtx.Checksum {
-		progressLen += int64(len(createdTables))
+		progressRatio += 1
 	}
-	progressLen += int64(len(createdTables)) // for pipeline item - update stats meta
+	progressRatio += 1 // for pipeline item - update stats meta
 	if plCtx.WaitTiflashReady {
-		progressLen += int64(len(createdTables))
+		progressRatio += 1
 	}
-
+	progressLen := int64(progressRatio * len(createdTables))
+	if plCtx.LoadStatsPhysical {
+		statsTableCount, err := rc.moveStatsTable(ctx, createdTables, plCtx.KvClient, plCtx.ChecksumConcurrency)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		progressLen -= int64(progressRatio * statsTableCount)
+	}
 	// Redirect to log if there is no log file to avoid unreadable output.
 	updateCh := plCtx.Glue.StartProgress(ctx, "Restore Pipeline", progressLen, !plCtx.LogProgress)
+	// We make bigger errCh so we won't block on multi-part failed.
+	errCh := make(chan error, 32)
+	postHandleCh := afterTableRestoredCh(ctx, createdTables, plCtx.LoadStatsPhysical)
 	defer updateCh.Close()
 	// pipeline checksum
 	if plCtx.Checksum {
@@ -119,7 +127,7 @@ func (rc *SnapClient) RestorePipeline(ctx context.Context, plCtx PipelineContext
 	}
 
 	// pipeline update meta and load stats
-	postHandleCh = rc.GoUpdateMetaAndLoadStats(ctx, plCtx.ExtStorage, postHandleCh, errCh, updateCh, plCtx.StatsConcurrency, plCtx.LoadStats)
+	postHandleCh = rc.GoUpdateMetaAndLoadStats(ctx, plCtx.ExtStorage, postHandleCh, errCh, updateCh, plCtx.StatsConcurrency, plCtx.LoadStats && !plCtx.LoadStatsPhysical)
 
 	// pipeline wait Tiflash synced
 	if plCtx.WaitTiflashReady {
@@ -137,18 +145,43 @@ func (rc *SnapClient) RestorePipeline(ctx context.Context, plCtx PipelineContext
 	return errors.Trace(err)
 }
 
-func afterTableRestoredCh(ctx context.Context, createdTables []*CreatedTable) <-chan *CreatedTable {
+func (rc *SnapClient) moveStatsTable(ctx context.Context, createdTables []*CreatedTable, kvClient kv.Client, checksumConcurrency uint) (int, error) {
+	moveStatsTableSQLPairs := make([]*MoveStatsTableSQLPairT, 0, 16)
+	for _, createdTable := range createdTables {
+		if pair := GenerateMoveStatsTableSQLPair(createdTable.OldTable.DB.Name.O, createdTable.OldTable.Info.Name.O); pair != nil {
+			moveStatsTableSQLPairs = append(moveStatsTableSQLPairs, pair)
+			if err := rc.execAndValidateChecksum(ctx, createdTable, kvClient, checksumConcurrency); err != nil {
+				return 0, err
+			}
+		}
+	}
+
+	for _, sqlPair := range moveStatsTableSQLPairs {
+		if err := rc.db.Session().Execute(ctx, sqlPair.DropSQL); err != nil {
+			return 0, errors.Trace(err)
+		}
+		if err := rc.db.Session().Execute(ctx, sqlPair.RenameSQL); err != nil {
+			return 0, errors.Trace(err)
+		}
+	}
+
+	return len(moveStatsTableSQLPairs), nil
+}
+
+func afterTableRestoredCh(ctx context.Context, createdTables []*CreatedTable, loadStatsPhysical bool) <-chan *CreatedTable {
 	outCh := make(chan *CreatedTable)
 
 	go func() {
 		defer close(outCh)
 
 		for _, createdTable := range createdTables {
+			if loadStatsPhysical && IsStatsTemporaryTable(createdTable.OldTable.DB.Name.O, createdTable.OldTable.Info.Name.O) {
+				continue
+			}
 			select {
 			case <-ctx.Done():
 				return
-			default:
-				outCh <- createdTable
+			case outCh <- createdTable:
 			}
 		}
 	}()
