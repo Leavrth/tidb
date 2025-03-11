@@ -392,6 +392,10 @@ func RunBackup(c context.Context, g glue.Glue, cmdName string, cfg *BackupConfig
 		ctx = opentracing.ContextWithSpan(ctx, span1)
 	}
 
+	if cfg.MemoryPredict {
+		return backupMemoryPrefict(ctx, g, cmdName, cfg)
+	}
+
 	u, err := storage.ParseBackend(cfg.Storage, &cfg.BackendOptions)
 	if err != nil {
 		return errors.Trace(err)

@@ -7,11 +7,14 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
 	"path"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	gcs "cloud.google.com/go/storage"
@@ -21,6 +24,7 @@ import (
 	backuppb "github.com/pingcap/kvproto/pkg/brpb"
 	"github.com/pingcap/kvproto/pkg/encryptionpb"
 	"github.com/pingcap/log"
+	"github.com/pingcap/tidb/br/pkg/backup"
 	"github.com/pingcap/tidb/br/pkg/conn"
 	"github.com/pingcap/tidb/br/pkg/conn/util"
 	berrors "github.com/pingcap/tidb/br/pkg/errors"
@@ -28,7 +32,14 @@ import (
 	"github.com/pingcap/tidb/br/pkg/metautil"
 	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/br/pkg/utils"
+	"github.com/pingcap/tidb/br/pkg/version"
+	"github.com/pingcap/tidb/pkg/distsql"
+	infoschemacontext "github.com/pingcap/tidb/pkg/infoschema/context"
+	"github.com/pingcap/tidb/pkg/kv"
+	"github.com/pingcap/tidb/pkg/meta"
+	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/sessionctx/vardef"
+	tidbutil "github.com/pingcap/tidb/pkg/util"
 	filter "github.com/pingcap/tidb/pkg/util/table-filter"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -37,6 +48,7 @@ import (
 	"go.etcd.io/etcd/client/pkg/v3/transport"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 )
@@ -100,6 +112,8 @@ const (
 
 	flagMetadataDownloadBatchSize    = "metadata-download-batch-size"
 	defaultMetadataDownloadBatchSize = 128
+
+	flagMemoryPredict = "memory-predict"
 
 	unlimited           = 0
 	crypterAES128KeyLen = 16
@@ -287,6 +301,9 @@ type Config struct {
 
 	// Metadata download batch size, such as metadata for log restore
 	MetadataDownloadBatchSize uint `json:"metadata-download-batch-size" toml:"metadata-download-batch-size"`
+
+	// predict the memory consumption for the specified task
+	MemoryPredict bool `json:"memory-predict" toml:"memory-predict"`
 }
 
 // DefineCommonFlags defines the flags common to all BRIE commands.
@@ -337,6 +354,8 @@ func DefineCommonFlags(flags *pflag.FlagSet) {
 
 	flags.Uint(flagMetadataDownloadBatchSize, defaultMetadataDownloadBatchSize,
 		"the batch size of downloading metadata, such as log restore metadata for truncate or restore")
+
+	flags.Bool(flagMemoryPredict, false, "predict the memory consumption for the specified task")
 
 	// log backup plaintext key flags
 	flags.String(flagLogBackupCipherType, "plaintext", "Encrypt/decrypt method, "+
@@ -1012,4 +1031,190 @@ func WriteStringToConsole(g glue.Glue, msg string) error {
 	b := []byte(msg)
 	_, err := glue.GetConsole(g).Out().Write(b)
 	return err
+}
+
+// based on pkg/infoschema.(*Data).add
+func calculateInfoschemaMemoryConsumption(tableInfo *model.TableInfo) (uint64, uint64, error) {
+	bTreeCount := uint64(2)
+	bTreeValueSize := uint64(0)
+	residentTableInfoSize := uint64(0)
+	if tableInfo.Partition != nil {
+		bTreeCount += uint64(len(tableInfo.Partition.Definitions))
+		bTreeValueSize += 24 * uint64(len(tableInfo.Partition.Definitions))
+	}
+	if infoschemacontext.HasSpecialAttributes(tableInfo) {
+		bTreeCount += 1
+		bTreeValueSize += 40
+		data, err := json.Marshal(tableInfo)
+		if err != nil {
+			return 0, 0, errors.Trace(err)
+		}
+		residentTableInfoSize += uint64(len(data))
+	}
+
+	// about one btree item costs 23 Bytes
+	return 23 * bTreeCount, residentTableInfoSize, nil
+}
+
+func backupMemoryPrefict(ctx context.Context, g glue.Glue, cmdName string, cfg *BackupConfig) error {
+	var (
+		policySize             uint64
+		bTreeSize              uint64
+		residentTableInfoSize  uint64
+		rangeSize              uint64
+		statsMemoryConsumption uint64
+	)
+	mgr, err := NewMgr(ctx, g, cfg.PD, cfg.TLS, GetKeepalive(&cfg.Config), cfg.CheckRequirements, false, conn.NormalVersionChecker)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	defer mgr.Close()
+
+	client := backup.NewBackupClient(ctx, mgr)
+	backupTS, err := client.GetTS(ctx, cfg.TimeAgo, cfg.BackupTS)
+	if err != nil {
+		return errors.Trace(err)
+	}
+
+	m := meta.NewReader(mgr.GetStorage().GetSnapshot(kv.NewVersion(backupTS)))
+	if isFullBackup(cmdName) {
+		policyList, err := m.ListPolicies()
+		if err != nil {
+			return errors.Trace(err)
+		}
+		for _, policyInfo := range policyList {
+			p, err := json.Marshal(policyInfo)
+			if err != nil {
+				return errors.Trace(err)
+			}
+			policySize += uint64(len(p))
+		}
+	}
+	dbs, err := m.ListDatabases()
+	if err != nil {
+		return errors.Trace(err)
+	}
+
+	rangeCount := 0
+	sampleRange := make([]*kv.KeyRange, 0)
+	concurrency := uint(4)
+	metas := make([]meta.Reader, 0, concurrency)
+	for i := uint(0); i < concurrency; i += 1 {
+		metas = append(metas, meta.NewReader(mgr.GetStorage().GetSnapshot(kv.NewVersion(backupTS))))
+	}
+	eg, ectx := errgroup.WithContext(ctx)
+	workerpool := tidbutil.NewWorkerPool(concurrency, "iterate metakv")
+	var lk sync.Mutex
+	for _, dbInfo := range dbs {
+		// skip system databases
+		if !cfg.TableFilter.MatchSchema(dbInfo.Name.O) || tidbutil.IsMemDB(dbInfo.Name.L) || utils.IsTemplateSysDB(dbInfo.Name) {
+			continue
+		}
+		dbID := dbInfo.ID
+		dbName := dbInfo.Name.O
+		workerpool.ApplyWithIDInErrorGroup(eg, func(id uint64) error {
+			return m.IterTables(dbID, func(tableInfo *model.TableInfo) error {
+				if ectx.Err() != nil {
+					return ectx.Err()
+				}
+				if tableInfo.Version > version.CURRENT_BACKUP_SUPPORT_TABLE_INFO_VERSION {
+					// normally this shouldn't happen in a production env.
+					// because we had a unit test to avoid table info version update silencly.
+					// and had version check before run backup.
+					return errors.Errorf("backup doesn't not support table %s with version %d, maybe try a new version of br",
+						tableInfo.Name.String(),
+						tableInfo.Version,
+					)
+				}
+				if !cfg.TableFilter.MatchTable(dbName, tableInfo.Name.O) {
+					// Skip tables other than the given table.
+					return nil
+				}
+
+				oneTableBTreeSize, oneTableResidentSize, err := calculateInfoschemaMemoryConsumption(tableInfo)
+				if err != nil {
+					return errors.Trace(err)
+				}
+
+				tableRanges, err := distsql.BuildTableRanges(tableInfo)
+				if err != nil {
+					return errors.Trace(err)
+				}
+				minKey := []byte{0xFF}
+				maxKey := []byte{}
+				for _, tableRange := range tableRanges {
+					if bytes.Compare(minKey, tableRange.StartKey) > 0 {
+						minKey = tableRange.StartKey
+					}
+					if bytes.Compare(maxKey, tableRange.EndKey) < 0 {
+						maxKey = tableRange.EndKey
+					}
+				}
+
+				lk.Lock()
+				sampleRange = append(sampleRange, &kv.KeyRange{
+					StartKey: minKey,
+					EndKey:   maxKey,
+				})
+				bTreeSize += oneTableBTreeSize
+				residentTableInfoSize += oneTableResidentSize
+				rangeCount += len(tableRanges)
+				lk.Unlock()
+				return nil
+			})
+		})
+	}
+	if err := eg.Wait(); err != nil {
+		return errors.Trace(err)
+	}
+	// about one range costs 124 Bytes
+	rangeSize = 124 * uint64(rangeCount)
+
+	// select 10000 ranges to get approximate region count
+	regionCount := 0
+	slices.SortFunc(sampleRange, func(l, r *kv.KeyRange) int {
+		return bytes.Compare(l.StartKey, r.StartKey)
+	})
+	step := max(len(sampleRange)/10000, 1)
+	for i := 0; i < len(sampleRange); i += step {
+		startKey := sampleRange[i].StartKey
+		end := i + step - 1
+		if end >= len(sampleRange) {
+			end = len(sampleRange) - 1
+		}
+		endKey := sampleRange[end].EndKey
+		oneRangeRegionCount, err := mgr.GetRegionCount(ctx, startKey, endKey)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		regionCount += oneRangeRegionCount
+	}
+
+	if !cfg.IgnoreStats {
+		statsMemoryConsumption = uint64(cfg.TableConcurrency) * uint64(50*1024*1024)
+	}
+
+	log.Info("backup memory consumption predict",
+		zap.String("policy memory consumption", units.HumanSize(float64(policySize))),
+		zap.String("infoschema btree memory consumption", units.HumanSize(float64(bTreeSize))),
+		zap.String("infoschema resident memory consumption", units.HumanSize(float64(residentTableInfoSize))),
+		zap.String("backup ranges memory consumption", units.HumanSize(float64(rangeSize))),
+		zap.Int("rangeCount", regionCount),
+		zap.Int("rangeCount", rangeCount),
+		zap.Int("db count", len(dbs)),
+		zap.String("stats memory consumption", units.HumanSize(float64(statsMemoryConsumption))),
+	)
+
+	memoryConsumption := policySize + bTreeSize + residentTableInfoSize + rangeSize +
+		max(
+			512*1024*1024+314*uint64(len(dbs))+uint64(statsMemoryConsumption),
+			2684*uint64(max(rangeCount, regionCount)),
+		)
+
+	log.Info("backup memory consumption predict",
+		zap.String("total memory consumption predict(minimum)", units.HumanSize(float64(memoryConsumption))),
+		zap.String("recommended memory configuration(GOMEMLIMIT)", units.HumanSize(float64(memoryConsumption*2))),
+	)
+
+	return nil
 }
