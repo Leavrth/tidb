@@ -755,6 +755,10 @@ func (cfg *Config) ParseFromFlags(flags *pflag.FlagSet) error {
 		return errors.Trace(err)
 	}
 
+	if cfg.MemoryPredict, err = flags.GetBool(flagMemoryPredict); err != nil {
+		return errors.Trace(err)
+	}
+
 	return cfg.normalizePDURLs()
 }
 
