@@ -236,6 +236,11 @@ func (c *CheckpointAdvancer) tryAdvance(ctx context.Context, length int,
 	})
 	clampedRanges := utils.IntersectAll(ranges, slices.Clone(c.taskRange))
 	for _, r := range clampedRanges {
+		if cx.Err() != nil {
+			log.Warn("collecting region checkpoint already stopped, so give up remain ranges",
+				zap.Error(context.Cause(cx)))
+			break
+		}
 		workers.ApplyOnErrorGroup(eg, func() (e error) {
 			defer c.recordTimeCost("get regions in range")()
 			defer utils.PanicToErr(&e)
