@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"math"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -925,7 +926,24 @@ func (rc *LogClient) RestoreKVFiles(
 					onProgress(kvCount)
 					updateStats(uint64(kvCount), size)
 					summary.CollectInt("File", len(files))
-
+					if err == nil {
+						failpoint.Inject("pause-until-file", func(v failpoint.Value) {
+							if sigFile, ok := v.(string); ok {
+								for {
+									_, statErr := os.Stat(sigFile)
+									if statErr != nil {
+										if !os.IsNotExist(statErr) {
+											err = statErr
+											break
+										}
+										time.Sleep(time.Second)
+										continue
+									}
+									break
+								}
+							}
+						})
+					}
 					if err == nil {
 						filenames := make([]string, 0, len(files))
 						for _, f := range files {
