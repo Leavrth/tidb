@@ -17,6 +17,7 @@ package unistore
 import (
 	"context"
 	"io"
+	"log"
 	"math"
 	"os"
 	"strconv"
@@ -37,6 +38,7 @@ import (
 	"github.com/pingcap/tidb/pkg/util/codec"
 	"github.com/tikv/client-go/v2/tikv"
 	"github.com/tikv/client-go/v2/tikvrpc"
+	"github.com/tikv/client-go/v2/util/async"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -59,6 +61,10 @@ var CheckResourceTagForTopSQLInGoTest bool
 
 // UnistoreRPCClientSendHook exports for test.
 var UnistoreRPCClientSendHook atomic.Pointer[func(*tikvrpc.Request)]
+
+func (c *RPCClient) SendRequestAsync(ctx context.Context, addr string, req *tikvrpc.Request, cb async.Callback[*tikvrpc.Response]) {
+	log.Panic("unimplement!")
+}
 
 // SendRequest sends a request to mock cluster.
 func (c *RPCClient) SendRequest(ctx context.Context, addr string, req *tikvrpc.Request, timeout time.Duration) (*tikvrpc.Response, error) {

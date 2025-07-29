@@ -81,8 +81,6 @@ import (
 	decoder "github.com/pingcap/tidb/pkg/util/rowDecoder"
 	"github.com/pingcap/tidb/pkg/util/size"
 	"github.com/pingcap/tidb/pkg/util/sqlexec"
-	"github.com/tikv/client-go/v2/oracle"
-	"github.com/tikv/client-go/v2/tikv"
 	kvutil "github.com/tikv/client-go/v2/util"
 	pdHttp "github.com/tikv/pd/client/http"
 	"go.uber.org/zap"
@@ -3082,10 +3080,10 @@ func getNextPartitionInfo(reorg *reorgInfo, t table.PartitionedTable, currPhysic
 	failpoint.Inject("mockUpdateCachedSafePoint", func(val failpoint.Value) {
 		//nolint:forcetypeassert
 		if val.(bool) {
-			ts := oracle.GoTimeToTS(time.Now())
+			//ts := oracle.GoTimeToTS(time.Now())
 			//nolint:forcetypeassert
-			s := reorg.jobCtx.store.(tikv.Storage)
-			s.UpdateTxnSafePointCache(ts, time.Now())
+			//s := reorg.jobCtx.store.(tikv.Storage)
+			//s.UpdateTxnSafePointCache(ts, time.Now())
 			time.Sleep(time.Second * 3)
 		}
 	})

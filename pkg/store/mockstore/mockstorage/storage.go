@@ -17,7 +17,9 @@ package mockstorage
 import (
 	"context"
 	"crypto/tls"
+	"log"
 	"sync"
+	"time"
 
 	deadlockpb "github.com/pingcap/kvproto/pkg/deadlock"
 	"github.com/pingcap/kvproto/pkg/keyspacepb"
@@ -40,6 +42,10 @@ type mockStorage struct {
 	LockWaits []*deadlockpb.WaitForEntry
 
 	keyspaceMeta *keyspacepb.KeyspaceMeta
+}
+
+func (s *mockStorage) UpdateTxnSafePointCache(txnSafePoint uint64, now time.Time) {
+	log.Panic("unimplement!")
 }
 
 // NewMockStorage wraps tikv.KVStore as kv.Storage.

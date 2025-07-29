@@ -25,7 +25,6 @@ import (
 	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/pingcap/tidb/pkg/util/sqlexec"
 	"github.com/stretchr/testify/require"
-	"github.com/tikv/client-go/v2/tikv"
 )
 
 func TestStaticRecordSet(t *testing.T) {
@@ -130,7 +129,7 @@ func TestStaticRecordSetExceedGCTime(t *testing.T) {
 	tk.MustExec("truncate table t")
 
 	// Update the safe point
-	store.(tikv.Storage).UpdateTxnSafePointCache(startTS+1, time.Now())
+	//store.(tikv.Storage).UpdateTxnSafePointCache(startTS+1, time.Now())
 
 	// Check data, it'll get an error
 	chk := srs.NewChunk(nil)

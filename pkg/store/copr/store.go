@@ -29,6 +29,7 @@ import (
 	"github.com/tikv/client-go/v2/config"
 	"github.com/tikv/client-go/v2/tikv"
 	"github.com/tikv/client-go/v2/tikvrpc"
+	"github.com/tikv/client-go/v2/util/async"
 )
 
 type kvStore struct {
@@ -71,6 +72,10 @@ func (c *tikvClient) CloseAddr(addr string) error {
 func (c *tikvClient) SendRequest(ctx context.Context, addr string, req *tikvrpc.Request, timeout time.Duration) (*tikvrpc.Response, error) {
 	res, err := c.c.SendRequest(ctx, addr, req, timeout)
 	return res, derr.ToTiDBErr(err)
+}
+
+func (c *tikvClient) SendRequestAsync(ctx context.Context, addr string, req *tikvrpc.Request, cb async.Callback[*tikvrpc.Response]) {
+	c.c.SendRequestAsync(ctx, addr, req, cb)
 }
 
 func (c *tikvClient) SetEventListener(listener tikv.ClientEventListener) {

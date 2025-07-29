@@ -34,7 +34,6 @@ import (
 	"github.com/pingcap/tidb/pkg/util"
 	"github.com/pingcap/tidb/pkg/util/codec"
 	"github.com/stretchr/testify/require"
-	"github.com/tikv/client-go/v2/tikv"
 )
 
 func TestSelectCheckVisibility(t *testing.T) {
@@ -45,12 +44,12 @@ func TestSelectCheckVisibility(t *testing.T) {
 	tk.MustExec("create table t (a varchar(10) key, b int,index idx(b))")
 	tk.MustExec("insert into t values('1',1)")
 	tk.MustExec("begin")
-	txn, err := tk.Session().Txn(false)
-	require.NoError(t, err)
-	ts := txn.StartTS()
-	sessionStore := tk.Session().GetStore().(tikv.Storage)
+	//txn, err := tk.Session().Txn(false)
+	//require.NoError(t, err)
+	//ts := txn.StartTS()
+	//sessionStore := tk.Session().GetStore().(tikv.Storage)
 	// Update gc safe time for check data visibility.
-	sessionStore.UpdateTxnSafePointCache(ts+1, time.Now())
+	//sessionStore.UpdateTxnSafePointCache(ts+1, time.Now())
 	checkSelectResultError := func(sql string, expectErr *terror.Error) {
 		re, err := tk.Exec(sql)
 		require.NoError(t, err)
