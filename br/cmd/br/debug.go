@@ -57,6 +57,7 @@ func NewDebugCommand() *cobra.Command {
 	meta.AddCommand(encodeBackupMetaCommand())
 	meta.AddCommand(setPDConfigCommand())
 	meta.AddCommand(searchStreamBackupCommand())
+	meta.AddCommand(compactAnalyzeCommand())
 	meta.Hidden = true
 
 	return meta

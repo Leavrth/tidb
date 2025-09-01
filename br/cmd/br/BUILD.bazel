@@ -6,6 +6,7 @@ go_library(
         "abort.go",
         "backup.go",
         "cmd.go",
+        "compact.go",
         "debug.go",
         "main.go",
         "operator.go",
@@ -49,6 +50,7 @@ go_library(
         "@com_github_pingcap_log//:log",
         "@com_github_spf13_cobra//:cobra",
         "@com_sourcegraph_sourcegraph_appdash//:appdash",
+        "@org_golang_x_sync//errgroup",
         "@org_uber_go_zap//:zap",
     ],
 )
