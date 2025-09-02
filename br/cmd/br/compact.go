@@ -22,13 +22,12 @@ import (
 	"github.com/pingcap/errors"
 	backuppb "github.com/pingcap/kvproto/pkg/brpb"
 	"github.com/pingcap/log"
+	logclient "github.com/pingcap/tidb/br/pkg/restore/log_client"
 	"github.com/pingcap/tidb/br/pkg/storage"
 	"github.com/pingcap/tidb/br/pkg/stream"
 	"github.com/pingcap/tidb/br/pkg/task"
-	tidbutil "github.com/pingcap/tidb/pkg/util"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
-	"golang.org/x/sync/errgroup"
 )
 
 // compactAnalyzeCommand returns a compact debug subcommand
@@ -72,7 +71,12 @@ func newCompactRatioCalculatedCommand() *cobra.Command {
 			if err != nil {
 				return errors.Trace(err)
 			}
+			skipmap, err := getSkipMapFromMigration(ctx, s)
+			if err != nil {
+				return errors.Trace(err)
+			}
 			totalSize := uint64(0)
+			compactionSize := uint64(0)
 			if err = stream.FastUnmarshalMetaData(ctx, s, lastSnapshotBackupTs, untilTs, cfg.MetadataDownloadBatchSize, func(path string, rawMetaData []byte) error {
 				meta := &backuppb.Metadata{}
 				if err := meta.Unmarshal(rawMetaData); err != nil {
@@ -82,18 +86,13 @@ func newCompactRatioCalculatedCommand() *cobra.Command {
 					for _, f := range fgs.DataFilesInfo {
 						if f.MinTs <= untilTs && f.MaxTs >= lastSnapshotBackupTs {
 							atomic.AddUint64(&totalSize, f.Length)
+							if skipmap.NeedSkip(path, fgs.Path, f.RangeOffset) {
+								atomic.AddUint64(&compactionSize, f.Length)
+							}
 						}
 					}
 				}
 				return nil
-			}); err != nil {
-				return errors.Trace(err)
-			}
-			compactionSize := uint64(0)
-			if err := walkCompactions(ctx, s, cfg.MetadataDownloadBatchSize, func(lfs *backuppb.LogFileSubcompaction) {
-				if lfs.Meta.InputMinTs <= untilTs && lfs.Meta.InputMaxTs >= lastSnapshotBackupTs {
-					atomic.AddUint64(&compactionSize, lfs.Meta.Size_)
-				}
 			}); err != nil {
 				return errors.Trace(err)
 			}
@@ -112,44 +111,17 @@ func newCompactRatioCalculatedCommand() *cobra.Command {
 	return command
 }
 
-func walkCompactions(ctx context.Context, s storage.ExternalStorage, concurrency uint, fn func(*backuppb.LogFileSubcompaction)) (retErr error) {
+func getSkipMapFromMigration(ctx context.Context, s storage.ExternalStorage) (*logclient.MetaSkipMapWrapper, error) {
+	skipmap := logclient.NewMetaSkipMapWrapper()
 	ext := stream.MigrationExtension(s)
 	migs, err := ext.Load(ctx)
 	if err != nil {
-		return errors.Trace(err)
+		return nil, errors.Trace(err)
 	}
-	workerpool := tidbutil.NewWorkerPool(concurrency, "read compaction metadata")
-	eg, ectx := errgroup.WithContext(ctx)
-	defer func() {
-		if err := eg.Wait(); err != nil {
-			retErr = err
-		}
-	}()
 	for _, mig := range migs.ListAll() {
-		for _, compaction := range mig.Compactions {
-			if err := s.WalkDir(ectx, &storage.WalkOption{SubDir: compaction.Artifacts}, func(path string, size int64) error {
-				if ectx.Err() != nil {
-					return errors.Trace(ectx.Err())
-				}
-				workerpool.ApplyOnErrorGroup(eg, func() error {
-					data, err := s.ReadFile(ectx, path)
-					if err != nil {
-						return errors.Trace(err)
-					}
-					subCompactions := &backuppb.LogFileSubcompactions{}
-					if err := subCompactions.Unmarshal(data); err != nil {
-						return errors.Trace(err)
-					}
-					for _, subCompaction := range subCompactions.Subcompactions {
-						fn(subCompaction)
-					}
-					return nil
-				})
-				return nil
-			}); err != nil {
-				return errors.Trace(err)
-			}
+		for _, editMeta := range mig.EditMeta {
+			skipmap.UpdateSkipMap(editMeta)
 		}
 	}
-	return nil
+	return skipmap, nil
 }

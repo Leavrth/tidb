@@ -78,16 +78,26 @@ func (skipmap metaSkipMap) skipLogical(metaPath, physicalPath string, offset uin
 	fileMap.skipmap[offset] = struct{}{}
 }
 
-func (skipmap metaSkipMap) NeedSkip(metaPath, physicalPath string, offset uint64) bool {
-	metaMap, exists := skipmap[metaPath]
-	if exists {
+type MetaSkipMapWrapper struct {
+	skipmap metaSkipMap
+}
+
+func NewMetaSkipMapWrapper() *MetaSkipMapWrapper {
+	return &MetaSkipMapWrapper{
+		skipmap: make(metaSkipMap),
+	}
+}
+
+func (skipmap *MetaSkipMapWrapper) NeedSkip(metaPath, physicalPath string, offset uint64) bool {
+	metaMap, exists := skipmap.skipmap[metaPath]
+	if !exists {
 		return false
 	}
 	if metaMap.skip {
 		return true
 	}
 	fileMap, exists := metaMap.skipmap[physicalPath]
-	if exists {
+	if !exists {
 		return false
 	}
 	if fileMap.skip {
@@ -95,6 +105,21 @@ func (skipmap metaSkipMap) NeedSkip(metaPath, physicalPath string, offset uint64
 	}
 	_, exists = fileMap.skipmap[offset]
 	return exists
+}
+
+func (skipmap *MetaSkipMapWrapper) UpdateSkipMap(metaEdit *backuppb.MetaEdit) {
+	if metaEdit.DestructSelf {
+		skipmap.skipmap.skipMeta(metaEdit.Path)
+		return
+	}
+	for _, path := range metaEdit.DeletePhysicalFiles {
+		skipmap.skipmap.skipPhysical(metaEdit.Path, path)
+	}
+	for _, filesInPhysical := range metaEdit.DeleteLogicalFiles {
+		for _, span := range filesInPhysical.Spans {
+			skipmap.skipmap.skipLogical(metaEdit.Path, filesInPhysical.Path, span.Offset)
+		}
+	}
 }
 
 type WithMigrationsBuilder struct {
