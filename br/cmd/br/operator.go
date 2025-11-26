@@ -37,6 +37,7 @@ func newOperatorCommand() *cobra.Command {
 	cmd.AddCommand(newMigrateToCommand())
 	cmd.AddCommand(newForceFlushCommand())
 	cmd.AddCommand(newChecksumCommand())
+	cmd.AddCommand(newDownstreamCheckpointAdvancerCommand())
 	return cmd
 }
 
@@ -151,5 +152,23 @@ func newForceFlushCommand() *cobra.Command {
 		},
 	}
 	operator.DefineFlagsForForceFlushConfig(cmd.Flags())
+	return cmd
+}
+
+func newDownstreamCheckpointAdvancerCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "downstream-checkpoint-advancer",
+		Short: "start a checkpoint advancer to calculate the downstream cluster log backup checkpoint under asynchronous replication.",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg := &operator.DownstreamCheckpointAdvancerConfig{}
+			if err := cfg.ParseFromFlags(cmd.Flags()); err != nil {
+				return err
+			}
+			ctx := GetDefaultContext()
+			return operator.RunDownstreamCheckpointAdvancer(ctx, cfg)
+		},
+	}
+	operator.DefineFlagsForDownstreamCheckpointAdvancer(cmd.Flags())
 	return cmd
 }

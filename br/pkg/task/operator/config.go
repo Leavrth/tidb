@@ -234,3 +234,57 @@ func (cfg *ChecksumWithRewriteRulesConfig) ParseFromFlags(flags *pflag.FlagSet) 
 	}
 	return cfg.Config.ParseFromFlags(flags)
 }
+
+type DownstreamCheckpointAdvancerConfig struct {
+	pd                []string
+	upstreamStorage   string
+	downstreamStorage string
+	tlsConfig         *task.TLSConfig
+	taskName          string
+}
+
+func (cfg *DownstreamCheckpointAdvancerConfig) ParseFromFlags(flags *pflag.FlagSet) (err error) {
+	cfg.pd, err = flags.GetStringSlice("pd")
+	if err != nil {
+		return err
+	}
+	if len(cfg.pd) == 0 {
+		return errors.Annotate(berrors.ErrInvalidArgument, "must provide at least one PD server address")
+	}
+	cfg.tlsConfig = &task.TLSConfig{}
+	if err := cfg.tlsConfig.ParseFromFlags(flags); err != nil {
+		return err
+	}
+	cfg.upstreamStorage, err = flags.GetString("upstream-storage")
+	if err != nil {
+		return err
+	}
+	if len(cfg.upstreamStorage) == 0 {
+		return errors.Annotate(berrors.ErrInvalidArgument, "must provide upstream external storage")
+	}
+	cfg.downstreamStorage, err = flags.GetString("downstream-storage")
+	if err != nil {
+		return err
+	}
+	if len(cfg.downstreamStorage) == 0 {
+		return errors.Annotate(berrors.ErrInvalidArgument, "must provide downstream external storage")
+	}
+	cfg.taskName, err = flags.GetString("task-name")
+	if err != nil {
+		return err
+	}
+	if len(cfg.taskName) == 0 {
+		return errors.Annotate(berrors.ErrInvalidArgument, "must provide log backup task name")
+	}
+	return nil
+}
+
+func DefineFlagsForDownstreamCheckpointAdvancer(f *pflag.FlagSet) {
+	f.StringSliceP("pd", "u", []string{}, "PD address")
+	f.String("ca", "", "CA certificate path for TLS connection")
+	f.String("cert", "", "Certificate path for TLS connection")
+	f.String("key", "", "Private key path for TLS connection")
+	f.String("upstream-storage", "", `specify the url where upstream log backup storage, eg, "s3://bucket/path/prefix"`)
+	f.String("downstream-storage", "", `specify the url where downstream log backup storage, eg, "s3://bucket/path/prefix"`)
+	f.String("task-name", "", "The task name for the backup log task")
+}
