@@ -137,7 +137,7 @@ func NewAdvancer(ctx context.Context, cfg *DownstreamCheckpointAdvancerConfig) (
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	ds, err := getStorage(ctx, cfg.upstreamStorage)
+	ds, err := getStorage(ctx, cfg.downstreamStorage)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -285,7 +285,8 @@ func (adv *Advancer) waitDownstreamFileSynced(ctx context.Context, filename stri
 func (adv *Advancer) waitDownstreamFilesSynced(ctx context.Context, prefixTs uint64) error {
 	subPrefix := fmt.Sprintf("v1/backupmeta/%09X", prefixTs>>28)
 	paths := make([]string, 0)
-	adv.us.WalkDir(ctx, &storage.WalkOption{SubDir: subPrefix}, func(path string, size int64) error {
+	adv.us.WalkDir(ctx, &storage.WalkOption{ObjPrefix: subPrefix}, func(path string, size int64) error {
+		log.Info("track metadata", zap.String("filename", path))
 		paths = append(paths, path)
 		return nil
 	})
