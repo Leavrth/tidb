@@ -480,6 +480,7 @@ func searchStreamBackupCommand() *cobra.Command {
 	flags.String("search-key", "", "hex encoded key")
 	flags.Uint64("start-ts", 0, "search from start TSO, default is no start TSO limit")
 	flags.Uint64("end-ts", 0, "search to end TSO, default is no end TSO limit")
+	flags.Bool("compact", false, "skip the log compacted kv and search them from compact sst")
 
 	return searchBackupCMD
 }
