@@ -69,13 +69,11 @@ func NewStreamBackupSearch(
 	comparator Comparator,
 	searchKey []byte,
 ) *StreamBackupSearch {
-	bs := &StreamBackupSearch{
+	return &StreamBackupSearch{
 		storage:    storage,
 		comparator: comparator,
+		searchKey:  searchKey,
 	}
-
-	bs.searchKey = searchKey //748000000000004EFFA55F728000000000FF0E8FEE0000000000FA
-	return bs
 }
 
 // SetStartTS set start timestamp searched from
@@ -221,7 +219,7 @@ func (s *StreamBackupSearch) Search(ctx context.Context) ([]*StreamKVInfo, error
 		}
 	}
 
-	entries := s.mergeCFEntries(defaultCFEntries, writeCFEntries)
+	entries := MergeCFEntries(defaultCFEntries, writeCFEntries)
 	return entries, nil
 }
 
@@ -319,7 +317,7 @@ func (s *StreamBackupSearch) searchFromDataFile(
 	return nil
 }
 
-func (s *StreamBackupSearch) mergeCFEntries(defaultCFEntries, writeCFEntries map[string]*StreamKVInfo) []*StreamKVInfo {
+func MergeCFEntries(defaultCFEntries, writeCFEntries map[string]*StreamKVInfo) []*StreamKVInfo {
 	entries := make([]*StreamKVInfo, 0, len(defaultCFEntries)+len(writeCFEntries))
 	mergedDefaultCFKeys := make(map[string]struct{}, 16)
 	for _, entry := range writeCFEntries {
