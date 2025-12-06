@@ -420,8 +420,8 @@ func setPDConfigCommand() *cobra.Command {
 
 func searchStreamBackupCommand() *cobra.Command {
 	searchBackupCMD := &cobra.Command{
-		Use:   "search-log-backup-compact",
-		Short: "search compacted log backup by key",
+		Use:   "search-log-backup",
+		Short: "search log backup by key",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := context.WithCancel(GetDefaultContext())
@@ -489,8 +489,8 @@ func searchStreamBackupCommand() *cobra.Command {
 
 func searchStreamCompactBackupCommand() *cobra.Command {
 	searchBackupCMD := &cobra.Command{
-		Use:   "search-log-backup",
-		Short: "search log backup by key",
+		Use:   "search-log-backup-compact",
+		Short: "search compacted log backup by key",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := context.WithCancel(GetDefaultContext())
@@ -525,8 +525,12 @@ func searchStreamCompactBackupCommand() *cobra.Command {
 			if err != nil {
 				return errors.Trace(err)
 			}
-
-			bs, err := streamdebug.NewStreamBackupCompactSearch(ctx, s, keyBytes, startTs, endTs)
+			migs, err := streamdebug.GetMigrations(ctx, s)
+			if err != nil {
+				return errors.Trace(err)
+			}
+			defer migs.ReadLock.Unlock(ctx)
+			bs, err := streamdebug.NewStreamBackupCompactSearch(ctx, s, migs.Migs, keyBytes, startTs, endTs)
 			if err != nil {
 				return errors.Trace(err)
 			}

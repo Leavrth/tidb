@@ -15,6 +15,7 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/pingcap/errors"
+	backuppb "github.com/pingcap/kvproto/pkg/brpb"
 	"github.com/pingcap/log"
 	logclient "github.com/pingcap/tidb/br/pkg/restore/log_client"
 	"github.com/pingcap/tidb/br/pkg/storage"
@@ -34,9 +35,29 @@ type StreamBackupCompactSearch struct {
 	endTs     uint64
 }
 
+func GetMigrations(ctx context.Context, storage storage.ExternalStorage) (*logclient.LockedMigrations, error) {
+	ext := stream.MigrationExtension(storage)
+	migs, err := ext.Load(ctx)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	ms := migs.ListAll()
+	readLock, err := ext.GetReadLock(ctx, "restore stream")
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	return &logclient.LockedMigrations{
+		Migs:     ms,
+		ReadLock: readLock,
+	}, nil
+}
+
 func NewStreamBackupCompactSearch(
 	ctx context.Context,
 	storage storage.ExternalStorage,
+	migs []*backuppb.Migration,
 	searchKey []byte,
 	startTs, endTs uint64,
 ) (*StreamBackupCompactSearch, error) {
@@ -51,6 +72,7 @@ func NewStreamBackupCompactSearch(
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
+	manager.BuildMigrations(migs)
 	return &StreamBackupCompactSearch{
 		storage,
 		manager,
