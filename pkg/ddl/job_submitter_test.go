@@ -582,6 +582,64 @@ func TestGenGIDAndInsertJobsWithRetryOnErr(t *testing.T) {
 	require.Equal(t, newGID-1, jobs[0].TableID)
 }
 
+func TestGenGIDAndInsertJobsWithRetrySplitOnTxnTooLarge(t *testing.T) {
+	store := testkit.CreateMockStore(t, mockstore.WithStoreType(mockstore.EmbedUnistore))
+	// disable DDL to avoid it interfere the test
+	tk := testkit.NewTestKit(t, store)
+	dom := domain.GetDomain(tk.Session())
+	dom.DDL().OwnerManager().CampaignCancel()
+	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnDDL)
+
+	ddlSe := sess.NewSession(tk.Session())
+	jobs := []*ddl.JobWrapper{
+		{
+			Job: &model.Job{
+				Version:    model.GetJobVerInUse(),
+				Type:       model.ActionCreateTable,
+				SchemaName: "test",
+				TableName:  "t1",
+			},
+			JobArgs: &model.CreateTableArgs{TableInfo: &model.TableInfo{}},
+		},
+		{
+			Job: &model.Job{
+				Version:    model.GetJobVerInUse(),
+				Type:       model.ActionCreateTable,
+				SchemaName: "test",
+				TableName:  "t2",
+			},
+			JobArgs: &model.CreateTableArgs{TableInfo: &model.TableInfo{}},
+		},
+		{
+			Job: &model.Job{
+				Version:    model.GetJobVerInUse(),
+				Type:       model.ActionCreateTable,
+				SchemaName: "test",
+				TableName:  "t3",
+			},
+			JobArgs: &model.CreateTableArgs{TableInfo: &model.TableInfo{}},
+		},
+		{
+			Job: &model.Job{
+				Version:    model.GetJobVerInUse(),
+				Type:       model.ActionCreateTable,
+				SchemaName: "test",
+				TableName:  "t4",
+			},
+			JobArgs: &model.CreateTableArgs{TableInfo: &model.TableInfo{}},
+		},
+	}
+
+	submitter := ddl.NewJobSubmitterForTest()
+	testfailpoint.Enable(t, "github.com/pingcap/tidb/pkg/ddl/mockInsertDDLJobsTxnTooLargeErr", `return(true)`)
+	require.NoError(t, submitter.GenGIDAndInsertJobsWithRetry(ctx, ddlSe, jobs))
+
+	gotJobs, err := ddl.GetAllDDLJobs(ctx, tk.Session())
+	require.NoError(t, err)
+	require.Len(t, gotJobs, len(jobs))
+	require.Len(t, submitter.DDLJobDoneChMap().Keys(), len(jobs))
+}
+
 func TestSubmitJobAfterDDLIsClosed(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t, mockstore.WithStoreType(mockstore.EmbedUnistore))
 	tk := testkit.NewTestKit(t, store)

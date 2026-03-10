@@ -349,7 +349,7 @@ func (s *JobSubmitter) addBatchDDLJobs2Table(jobWs []*JobWrapper) error {
 func (s *JobSubmitter) GenGIDAndInsertJobsWithRetry(ctx context.Context, ddlSe *sess.Session, jobWs []*JobWrapper) error {
 	savedJobIDs := make([]int64, len(jobWs))
 	count := getRequiredGIDCount(jobWs)
-	return genGIDAndCallWithRetry(ctx, ddlSe, count, func(ids []int64) error {
+	err := genGIDAndCallWithRetry(ctx, ddlSe, count, func(ids []int64) error {
 		failpoint.Inject("mockGenGlobalIDFail", func(val failpoint.Value) {
 			if val.(bool) {
 				failpoint.Return(errors.New("gofail genGlobalIDs error"))
@@ -371,6 +371,19 @@ func (s *JobSubmitter) GenGIDAndInsertJobsWithRetry(ctx context.Context, ddlSe *
 		})
 		return insertDDLJobs2Table(ctx, ddlSe, jobWs...)
 	})
+	if !kv.ErrTxnTooLarge.Equal(err) || len(jobWs) <= 1 {
+		return err
+	}
+	for _, jobW := range jobWs {
+		s.ddlJobDoneChMap.Delete(jobW.ID)
+	}
+	logutil.DDLLogger().Warn("insert DDL jobs meets txn too large, split batch and retry",
+		zap.Int("batchSize", len(jobWs)))
+	mid := len(jobWs) / 2
+	if err = s.GenGIDAndInsertJobsWithRetry(ctx, ddlSe, jobWs[:mid]); err != nil {
+		return err
+	}
+	return s.GenGIDAndInsertJobsWithRetry(ctx, ddlSe, jobWs[mid:])
 }
 
 type gidAllocator struct {
@@ -603,6 +616,11 @@ func insertDDLJobs2Table(ctx context.Context, se *sess.Session, jobWs ...*JobWra
 	failpoint.Inject("mockAddBatchDDLJobsErr", func(val failpoint.Value) {
 		if val.(bool) {
 			failpoint.Return(errors.Errorf("mockAddBatchDDLJobsErr"))
+		}
+	})
+	failpoint.Inject("mockInsertDDLJobsTxnTooLargeErr", func(val failpoint.Value) {
+		if val.(bool) && len(jobWs) > 1 {
+			failpoint.Return(kv.ErrTxnTooLarge)
 		}
 	})
 	if len(jobWs) == 0 {
