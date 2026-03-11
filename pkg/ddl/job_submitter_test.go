@@ -640,6 +640,77 @@ func TestGenGIDAndInsertJobsWithRetrySplitOnTxnTooLarge(t *testing.T) {
 	require.Len(t, submitter.DDLJobDoneChMap().Keys(), len(jobs))
 }
 
+func TestGenGIDAndInsertJobsWithRetrySplitPartialFailure(t *testing.T) {
+	store := testkit.CreateMockStore(t, mockstore.WithStoreType(mockstore.EmbedUnistore))
+	// disable DDL to avoid it interfere the test
+	tk := testkit.NewTestKit(t, store)
+	dom := domain.GetDomain(tk.Session())
+	dom.DDL().OwnerManager().CampaignCancel()
+	ctx := kv.WithInternalSourceType(context.Background(), kv.InternalTxnDDL)
+
+	ddlSe := sess.NewSession(tk.Session())
+	jobs := []*ddl.JobWrapper{
+		{
+			Job: &model.Job{
+				Version:    model.GetJobVerInUse(),
+				Type:       model.ActionCreateTable,
+				SchemaName: "test",
+				TableName:  "t1",
+			},
+			JobArgs: &model.CreateTableArgs{TableInfo: &model.TableInfo{}},
+		},
+		{
+			Job: &model.Job{
+				Version:    model.GetJobVerInUse(),
+				Type:       model.ActionCreateTable,
+				SchemaName: "test",
+				TableName:  "t2",
+			},
+			JobArgs: &model.CreateTableArgs{TableInfo: &model.TableInfo{}},
+		},
+		{
+			Job: &model.Job{
+				Version:    model.GetJobVerInUse(),
+				Type:       model.ActionCreateTable,
+				SchemaName: "test",
+				TableName:  "t3",
+			},
+			JobArgs: &model.CreateTableArgs{TableInfo: &model.TableInfo{}},
+		},
+		{
+			Job: &model.Job{
+				Version:    model.GetJobVerInUse(),
+				Type:       model.ActionCreateTable,
+				SchemaName: "test",
+				TableName:  "t4",
+			},
+			JobArgs: &model.CreateTableArgs{TableInfo: &model.TableInfo{}},
+		},
+	}
+
+	submitter := ddl.NewJobSubmitterForTest()
+	testfailpoint.Enable(t, "github.com/pingcap/tidb/pkg/ddl/mockInsertDDLJobsTxnTooLargeErr", `return(true)`)
+	testfailpoint.Enable(t, "github.com/pingcap/tidb/pkg/ddl/mockInsertDDLJobsErrOnTableName", `return("t3")`)
+	err := submitter.GenGIDAndInsertJobsWithRetry(ctx, ddlSe, jobs)
+	require.Error(t, err)
+
+	gotJobs, queryErr := ddl.GetAllDDLJobs(ctx, tk.Session())
+	require.NoError(t, queryErr)
+	require.Len(t, gotJobs, 3)
+	gotTableNames := make(map[string]struct{}, len(gotJobs))
+	for _, j := range gotJobs {
+		gotTableNames[j.TableName] = struct{}{}
+	}
+	_, ok := gotTableNames["t1"]
+	require.True(t, ok)
+	_, ok = gotTableNames["t2"]
+	require.True(t, ok)
+	_, ok = gotTableNames["t4"]
+	require.True(t, ok)
+	_, ok = gotTableNames["t3"]
+	require.False(t, ok)
+}
+
 func TestSubmitJobAfterDDLIsClosed(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomain(t, mockstore.WithStoreType(mockstore.EmbedUnistore))
 	tk := testkit.NewTestKit(t, store)

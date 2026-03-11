@@ -115,21 +115,44 @@ func (s *JobSubmitter) addBatchDDLJobs(jobWs []*JobWrapper) {
 	}
 	err = s.addBatchDDLJobs2Table(jobWs)
 	var jobs string
+	hasSubmitted := false
+	failedCount := 0
+	var firstJobErr error
 	for _, jobW := range jobWs {
-		if err == nil {
-			err = jobW.cacheErr
+		jobErr := jobW.cacheErr
+		// For non-partial errors, fan out to all jobs without per-job errors.
+		if jobErr == nil && err != nil && !errors.ErrorEqual(err, errPartialJobSubmit) {
+			jobErr = err
 		}
-		jobW.NotifyResult(err)
+		if jobErr != nil {
+			failedCount++
+			if firstJobErr == nil {
+				firstJobErr = jobErr
+			}
+		} else {
+			hasSubmitted = true
+		}
+		jobW.NotifyResult(jobErr)
 		jobs += jobW.Job.String() + "; "
 		metrics.DDLWorkerHistogram.WithLabelValues(metrics.WorkerAddDDLJob, jobW.Job.Type.String(),
-			metrics.RetLabel(err)).Observe(time.Since(startTime).Seconds())
+			metrics.RetLabel(jobErr)).Observe(time.Since(startTime).Seconds())
 	}
-	if err != nil {
-		logutil.DDLLogger().Warn("add DDL jobs failed", zap.String("jobs", jobs), zap.Error(err))
+	if hasSubmitted {
+		// Some jobs are already in mysql.tidb_ddl_job, still need to wake scheduler.
+		s.notifyNewJobSubmitted()
+	}
+	if failedCount > 0 {
+		if errors.ErrorEqual(err, errPartialJobSubmit) {
+			logutil.DDLLogger().Warn("add DDL jobs partially failed",
+				zap.String("jobs", jobs),
+				zap.Bool("hasSuccess", hasSubmitted),
+				zap.Int("failedCount", failedCount),
+				zap.Error(firstJobErr))
+			return
+		}
+		logutil.DDLLogger().Warn("add DDL jobs failed", zap.String("jobs", jobs), zap.Error(firstJobErr))
 		return
 	}
-	// Notice worker that we push a new job and wait the job done.
-	s.notifyNewJobSubmitted()
 	logutil.DDLLogger().Info("add DDL jobs",
 		zap.Int("batch count", len(jobWs)),
 		zap.String("jobs", jobs),
@@ -301,6 +324,7 @@ func (s *JobSubmitter) addBatchDDLJobs2Table(jobWs []*JobWrapper) error {
 		return errors.Trace(err)
 	}
 
+	updatedJobWs := make([]*JobWrapper, 0, len(jobWs))
 	for _, jobW := range jobWs {
 		job := jobW.Job
 		intest.Assert(job.Version != 0, "Job version should not be zero")
@@ -331,10 +355,11 @@ func (s *JobSubmitter) addBatchDDLJobs2Table(jobWs []*JobWrapper) error {
 			}
 			logutil.DDLUpgradingLogger().Info("pause user DDL by system successful", zap.Stringer("job", job))
 		}
+		updatedJobWs = append(updatedJobWs, jobW)
 	}
 
 	ddlSe := sess.NewSession(se)
-	if err = s.GenGIDAndInsertJobsWithRetry(ctx, ddlSe, jobWs); err != nil {
+	if err = s.GenGIDAndInsertJobsWithRetry(ctx, ddlSe, updatedJobWs); err != nil {
 		return errors.Trace(err)
 	}
 
@@ -380,10 +405,31 @@ func (s *JobSubmitter) GenGIDAndInsertJobsWithRetry(ctx context.Context, ddlSe *
 	logutil.DDLLogger().Warn("insert DDL jobs meets txn too large, split batch and retry",
 		zap.Int("batchSize", len(jobWs)))
 	mid := len(jobWs) / 2
-	if err = s.GenGIDAndInsertJobsWithRetry(ctx, ddlSe, jobWs[:mid]); err != nil {
-		return err
+	leftErr := s.GenGIDAndInsertJobsWithRetry(ctx, ddlSe, jobWs[:mid])
+	rightErr := s.GenGIDAndInsertJobsWithRetry(ctx, ddlSe, jobWs[mid:])
+	markFailedJobs(jobWs[:mid], leftErr)
+	markFailedJobs(jobWs[mid:], rightErr)
+	if leftErr == nil && rightErr == nil {
+		return nil
 	}
-	return s.GenGIDAndInsertJobsWithRetry(ctx, ddlSe, jobWs[mid:])
+	return errPartialJobSubmit
+}
+
+var errPartialJobSubmit = errors.New("partial DDL jobs submission failed")
+
+func markFailedJobs(jobs []*JobWrapper, err error) {
+	if err == nil {
+		return
+	}
+	// Partial error already has precise per-job cacheErr marked in children.
+	if errors.ErrorEqual(err, errPartialJobSubmit) {
+		return
+	}
+	for _, jobW := range jobs {
+		if jobW.cacheErr == nil {
+			jobW.cacheErr = err
+		}
+	}
 }
 
 type gidAllocator struct {
@@ -621,6 +667,16 @@ func insertDDLJobs2Table(ctx context.Context, se *sess.Session, jobWs ...*JobWra
 	failpoint.Inject("mockInsertDDLJobsTxnTooLargeErr", func(val failpoint.Value) {
 		if val.(bool) && len(jobWs) > 1 {
 			failpoint.Return(kv.ErrTxnTooLarge)
+		}
+	})
+	failpoint.Inject("mockInsertDDLJobsErrOnTableName", func(val failpoint.Value) {
+		tblName, ok := val.(string)
+		if ok {
+			for _, jobW := range jobWs {
+				if jobW.TableName == tblName {
+					failpoint.Return(errors.New("mockInsertDDLJobsErrOnTableName"))
+				}
+			}
 		}
 	})
 	if len(jobWs) == 0 {
