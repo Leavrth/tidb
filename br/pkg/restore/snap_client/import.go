@@ -212,6 +212,10 @@ func NewSnapFileImporter(
 	if options.concurrencyPerStore == 0 {
 		return nil, errors.New("concurrencyPerStore must be greater than 0")
 	}
+	var pdReqTokens chan struct{}
+	if options.scanConcurrency > 0 {
+		pdReqTokens = utils.BuildWorkerTokenChannel(options.scanConcurrency)
+	}
 	fileImporter := &SnapFileImporter{
 		apiVersion: apiVersion,
 		kvMode:     kvMode,
@@ -225,7 +229,7 @@ func NewSnapFileImporter(
 		rewriteMode:         options.rewriteMode,
 		cacheKey:            fmt.Sprintf("BR-%s-%d", time.Now().Format("20060102150405"), rand.Int63()),
 		concurrencyPerStore: options.concurrencyPerStore,
-		pdReqTokens:         utils.BuildWorkerTokenChannel(options.scanConcurrency),
+		pdReqTokens:         pdReqTokens,
 		cond:                sync.NewCond(new(sync.Mutex)),
 		closeCallbacks:      options.closeCallbacks,
 	}
@@ -281,16 +285,21 @@ func (importer *SnapFileImporter) Close() error {
 }
 
 func (importer *SnapFileImporter) acquirePDReqToken(ctx context.Context) error {
-	select {
-	case <-ctx.Done():
-		return errors.Trace(ctx.Err())
-	case <-importer.pdReqTokens:
-		return nil
+	if importer.pdReqTokens != nil {
+		select {
+		case <-ctx.Done():
+			return errors.Trace(ctx.Err())
+		case <-importer.pdReqTokens:
+			return nil
+		}
 	}
+	return nil
 }
 
 func (importer *SnapFileImporter) releasePDReqToken() {
-	importer.pdReqTokens <- struct{}{}
+	if importer.pdReqTokens != nil {
+		importer.pdReqTokens <- struct{}{}
+	}
 }
 
 func (importer *SnapFileImporter) paginateScanRegion(
