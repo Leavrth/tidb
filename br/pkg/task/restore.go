@@ -191,7 +191,7 @@ func DefineRestoreCommonFlags(flags *pflag.FlagSet) {
 	flags.Uint(FlagPDConcurrency, defaultPDConcurrency,
 		"(deprecated) concurrency pd-relative operations like split & scatter.")
 	flags.Uint(FlagRegionScanConcurrency, defaultRegionScanConcurrency,
-		"max in-flight region scan requests to PD during restore")
+		"max in-flight region scan requests to PD during restore. Set to 0 for unlimited.")
 	flags.Uint(FlagStatsConcurrency, defaultStatsConcurrency,
 		"concurrency to restore statistic")
 	flags.Duration(FlagBatchFlushInterval, defaultBatchFlushInterval,
@@ -609,9 +609,6 @@ func (cfg *RestoreConfig) Adjust() {
 	}
 	if cfg.PDConcurrency == 0 {
 		cfg.PDConcurrency = defaultPDConcurrency
-	}
-	if cfg.RegionScanConcurrency == 0 {
-		cfg.RegionScanConcurrency = defaultRegionScanConcurrency
 	}
 	if cfg.StatsConcurrency == 0 {
 		cfg.StatsConcurrency = defaultStatsConcurrency
