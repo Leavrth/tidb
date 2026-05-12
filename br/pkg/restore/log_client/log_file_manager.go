@@ -81,6 +81,7 @@ type streamMetadataHelper interface {
 		path string,
 		offset uint64,
 		length uint64,
+		rawLength uint64,
 		compressionType backuppb.CompressionType,
 		storage storage.ExternalStorage,
 		encryptionInfo *encryptionpb.FileEncryptionInfo,
@@ -329,7 +330,7 @@ func (lm *LogFileManager) collectDDLFilesAndPrepareCache(
 
 	dataFileInfos := make([]*backuppb.DataFileInfo, 0)
 	for _, g := range fs.Item {
-		lm.helper.InitCacheEntry(g.Path, len(g.FileMetas))
+		lm.helper.InitCacheEntry(g.Path, countReadableMetaKVFiles(g.FileMetas))
 		dataFileInfos = append(dataFileInfos, g.FileMetas...)
 	}
 
@@ -453,7 +454,7 @@ func (lm *LogFileManager) ReadFilteredEntriesFromFiles(
 	kvEntries := make([]*KvEntryWithTS, 0)
 	filteredOutKvEntries := make([]*KvEntryWithTS, 0)
 
-	buff, err := lm.helper.ReadFile(ctx, file.Path, file.RangeOffset, file.RangeLength, file.CompressionType,
+	buff, err := lm.helper.ReadFile(ctx, file.Path, file.RangeOffset, file.RangeLength, file.Length, file.CompressionType,
 		lm.storage, file.FileEncryptionInfo)
 	if err != nil {
 		return nil, nil, errors.Trace(err)
