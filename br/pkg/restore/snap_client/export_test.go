@@ -19,6 +19,7 @@ import (
 	"context"
 
 	"github.com/pingcap/errors"
+	backuppb "github.com/pingcap/kvproto/pkg/brpb"
 	"github.com/pingcap/kvproto/pkg/import_sstpb"
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
 	"github.com/pingcap/kvproto/pkg/metapb"
@@ -57,6 +58,15 @@ func MockClient(dbs map[string]*metautil.Database) *SnapClient {
 
 func (rc *SnapClient) SetDomain(dom *domain.Domain) {
 	rc.dom = dom
+}
+
+func (importer *SnapFileImporter) BuildDownloadRequestForTest(
+	file *backuppb.File,
+	rewriteRules *restoreutils.RewriteRules,
+	regionInfo *split.RegionInfo,
+	cipher *backuppb.CipherInfo,
+) (*import_sstpb.DownloadRequest, import_sstpb.SSTMeta, error) {
+	return importer.buildDownloadRequest(file, rewriteRules, regionInfo, cipher)
 }
 
 // Mock the call of setSpeedLimit function

@@ -17,6 +17,7 @@ package snapclient
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"math/rand"
 	"slices"
@@ -588,6 +589,83 @@ func getSSTMetaFromFile(
 	}, nil
 }
 
+func (importer *SnapFileImporter) generateStableSSTMetaUUID(
+	file *backuppb.File,
+	region *metapb.Region,
+	rule *import_sstpb.RewriteRule,
+	meta *import_sstpb.SSTMeta,
+) []byte {
+	uid := stableSSTMetaUUID(importer.cacheKey, importer.kvMode, importer.rewriteMode, file, region, rule, meta)
+	return append([]byte(nil), uid[:]...)
+}
+
+func stableSSTMetaUUID(
+	cacheKey string,
+	kvMode KvMode,
+	rewriteMode RewriteMode,
+	file *backuppb.File,
+	region *metapb.Region,
+	rule *import_sstpb.RewriteRule,
+	meta *import_sstpb.SSTMeta,
+) uuid.UUID {
+	seed := []byte("tidb/br/snap-client/sst-meta/v1")
+	seed = appendStringToUUIDSeed(seed, cacheKey)
+	seed = appendUint64ToUUIDSeed(seed, uint64(kvMode))
+	seed = appendUint64ToUUIDSeed(seed, uint64(rewriteMode))
+	if file != nil {
+		seed = appendStringToUUIDSeed(seed, file.GetName())
+		seed = appendStringToUUIDSeed(seed, file.GetCf())
+		seed = appendBytesToUUIDSeed(seed, file.GetStartKey())
+		seed = appendBytesToUUIDSeed(seed, file.GetEndKey())
+		seed = appendUint64ToUUIDSeed(seed, file.GetSize_())
+		seed = appendBytesToUUIDSeed(seed, file.GetCipherIv())
+	}
+	if region != nil {
+		seed = appendUint64ToUUIDSeed(seed, region.GetId())
+		seed = appendBytesToUUIDSeed(seed, region.GetStartKey())
+		seed = appendBytesToUUIDSeed(seed, region.GetEndKey())
+		seed = appendUint64ToUUIDSeed(seed, region.GetRegionEpoch().GetConfVer())
+		seed = appendUint64ToUUIDSeed(seed, region.GetRegionEpoch().GetVersion())
+	}
+	if rule != nil {
+		seed = appendBytesToUUIDSeed(seed, rule.GetOldKeyPrefix())
+		seed = appendBytesToUUIDSeed(seed, rule.GetNewKeyPrefix())
+		seed = appendUint64ToUUIDSeed(seed, rule.GetNewTimestamp())
+		seed = appendUint64ToUUIDSeed(seed, rule.GetIgnoreAfterTimestamp())
+		seed = appendUint64ToUUIDSeed(seed, rule.GetIgnoreBeforeTimestamp())
+	}
+	if meta != nil {
+		seed = appendStringToUUIDSeed(seed, meta.GetCfName())
+		seed = appendBytesToUUIDSeed(seed, meta.GetRange().GetStart())
+		seed = appendBytesToUUIDSeed(seed, meta.GetRange().GetEnd())
+		seed = appendUint64ToUUIDSeed(seed, meta.GetLength())
+		seed = appendUint64ToUUIDSeed(seed, meta.GetRegionId())
+		seed = appendUint64ToUUIDSeed(seed, meta.GetRegionEpoch().GetConfVer())
+		seed = appendUint64ToUUIDSeed(seed, meta.GetRegionEpoch().GetVersion())
+		if meta.GetEndKeyExclusive() {
+			seed = append(seed, 1)
+		} else {
+			seed = append(seed, 0)
+		}
+	}
+	return uuid.NewSHA1(uuid.NameSpaceOID, seed)
+}
+
+func appendStringToUUIDSeed(seed []byte, value string) []byte {
+	return appendBytesToUUIDSeed(seed, []byte(value))
+}
+
+func appendBytesToUUIDSeed(seed []byte, value []byte) []byte {
+	seed = appendUint64ToUUIDSeed(seed, uint64(len(value)))
+	return append(seed, value...)
+}
+
+func appendUint64ToUUIDSeed(seed []byte, value uint64) []byte {
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], value)
+	return append(seed, buf[:]...)
+}
+
 // a new way to download ssts files
 // 1. download write + default sst files at peer level.
 // 2. control the download concurrency per store.
@@ -686,6 +764,7 @@ func (importer *SnapFileImporter) buildDownloadRequest(
 	if err != nil {
 		return nil, import_sstpb.SSTMeta{}, err
 	}
+	sstMeta.Uuid = importer.generateStableSSTMetaUUID(file, regionInfo.Region, &rule, sstMeta)
 
 	req := &import_sstpb.DownloadRequest{
 		Sst:            *sstMeta,
@@ -959,6 +1038,7 @@ func (importer *SnapFileImporter) downloadRawKVSST(
 					logutil.Region(regionInfo.Region), zap.Error(berrors.ErrKVRangeIsEmpty))
 				continue
 			}
+			sstMeta.Uuid = importer.generateStableSSTMetaUUID(file, regionInfo.Region, &rule, sstMeta)
 
 			req := &import_sstpb.DownloadRequest{
 				Sst:            *sstMeta,

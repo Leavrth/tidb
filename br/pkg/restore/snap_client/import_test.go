@@ -30,6 +30,7 @@ import (
 	snapclient "github.com/pingcap/tidb/br/pkg/restore/snap_client"
 	"github.com/pingcap/tidb/br/pkg/restore/split"
 	restoreutils "github.com/pingcap/tidb/br/pkg/restore/utils"
+	"github.com/pingcap/tidb/pkg/tablecodec"
 	"github.com/pingcap/tidb/pkg/util/codec"
 	"github.com/stretchr/testify/require"
 	tikvclient "github.com/tikv/client-go/v2/tikv"
@@ -113,6 +114,59 @@ func TestGetSSTMetaFromFile(t *testing.T) {
 	require.Nil(t, err)
 	require.Equal(t, "t2abc", string(sstMeta.GetRange().GetStart()))
 	require.Equal(t, "t2\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff", string(sstMeta.GetRange().GetEnd()))
+}
+
+func TestBuildDownloadRequestUsesStableSSTMetaUUID(t *testing.T) {
+	ctx := context.Background()
+	opt := snapclient.NewSnapFileImporterOptionsForTest(nil, newFakeImporterClient(), generateStores(), snapclient.RewriteModeKeyspace, 10)
+	importer, err := snapclient.NewSnapFileImporter(ctx, kvrpcpb.APIVersion_V1, snapclient.TiDBFull, opt)
+	require.NoError(t, err)
+
+	oldPrefix := tablecodec.EncodeTablePrefix(1)
+	newPrefix := tablecodec.EncodeTablePrefix(2)
+	file := &backuppb.File{
+		Name:     "file_default.sst",
+		StartKey: append(append([]byte{}, oldPrefix...), 'a'),
+		EndKey:   append(append([]byte{}, oldPrefix...), 'z'),
+		Size_:    123,
+	}
+	rules := &restoreutils.RewriteRules{
+		Data: []*import_sstpb.RewriteRule{
+			{
+				OldKeyPrefix: oldPrefix,
+				NewKeyPrefix: newPrefix,
+			},
+		},
+	}
+	regionInfo := &split.RegionInfo{
+		Region: &metapb.Region{
+			Id:       42,
+			StartKey: codec.EncodeBytes(nil, newPrefix),
+			EndKey:   codec.EncodeBytes(nil, append(append([]byte{}, newPrefix...), 0xff)),
+			RegionEpoch: &metapb.RegionEpoch{
+				ConfVer: 1,
+				Version: 2,
+			},
+		},
+		Leader: &metapb.Peer{StoreId: 1},
+	}
+
+	req1, meta1, err := importer.BuildDownloadRequestForTest(file, rules, regionInfo, nil)
+	require.NoError(t, err)
+	req2, meta2, err := importer.BuildDownloadRequestForTest(file, rules, regionInfo, nil)
+	require.NoError(t, err)
+	require.Equal(t, meta1.Uuid, meta2.Uuid)
+	require.Equal(t, req1.Sst.Uuid, req2.Sst.Uuid)
+
+	otherRegion := *regionInfo.Region
+	otherRegion.Id++
+	req3, meta3, err := importer.BuildDownloadRequestForTest(file, rules, &split.RegionInfo{
+		Region: &otherRegion,
+		Leader: regionInfo.Leader,
+	}, nil)
+	require.NoError(t, err)
+	require.NotEqual(t, meta1.Uuid, meta3.Uuid)
+	require.NotEqual(t, req1.Sst.Uuid, req3.Sst.Uuid)
 }
 
 type fakeImporterClient struct {
