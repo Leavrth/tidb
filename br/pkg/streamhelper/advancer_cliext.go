@@ -75,6 +75,7 @@ var (
 	// etcd's default periodic watch progress is too sparse for failover, so request it proactively.
 	metadataWatchProgressInterval = 30 * time.Second
 	metadataWatchCreateTimeout    = 5 * time.Second
+	metadataRequestTimeout        = 5 * time.Second
 	metadataWatchIdleTimeout      = 90 * time.Second
 )
 
@@ -315,8 +316,17 @@ func (t MetaDataClient) WaitGlobalCheckpointAdvance(ctx context.Context, taskNam
 
 func (t MetaDataClient) getGlobalCheckpointWithRevision(ctx context.Context, taskName string) (uint64, int64, error) {
 	key := GlobalCheckpointOf(taskName)
-	resp, err := t.KV.Get(ctx, key)
+	redactedKey := redact.Key([]byte(key))
+	requestCtx, cancel := context.WithTimeout(ctx, metadataRequestTimeout)
+	resp, err := t.KV.Get(requestCtx, key)
+	cancel()
 	if err != nil {
+		log.Warn("failed to get global checkpoint from metadata store",
+			zap.String("category", "log backup advancer"),
+			zap.String("key", redactedKey),
+			zap.String("task", taskName),
+			zap.Duration("timeout", metadataRequestTimeout),
+			logutil.ShortError(err))
 		return 0, 0, err
 	}
 
