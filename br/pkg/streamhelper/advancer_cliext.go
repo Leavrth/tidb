@@ -75,7 +75,7 @@ var (
 	// etcd's default periodic watch progress is too sparse for failover, so request it proactively.
 	metadataWatchProgressInterval = 30 * time.Second
 	metadataWatchCreateTimeout    = 5 * time.Second
-	metadataRequestTimeout        = 5 * time.Second
+	metadataRequestTimeout        = 15 * time.Second
 	metadataWatchIdleTimeout      = 90 * time.Second
 )
 
@@ -349,11 +349,6 @@ func (t MetaDataClient) waitCheckpointEvent(
 	rev int64,
 ) error {
 	redactedKey := redact.Key([]byte(key))
-	log.Info("start waiting for global checkpoint event",
-		zap.String("category", "log backup advancer"),
-		zap.String("key", redactedKey),
-		zap.Uint64("current-checkpoint", current),
-		zap.Int64("revision", rev))
 	watchCtx, cancelWatch := context.WithCancel(clientv3.WithRequireLeader(ctx))
 	defer cancelWatch()
 	// etcd Watch may block before returning the watch channel when creating the watch stream.
@@ -374,12 +369,6 @@ func (t MetaDataClient) waitCheckpointEvent(
 	watchCreateTimer.Stop()
 	if watchCreateTimedOut.Load() {
 		log.Warn("global checkpoint watch returned after creation timeout",
-			zap.String("category", "log backup advancer"),
-			zap.String("key", redactedKey),
-			zap.Uint64("current-checkpoint", current),
-			zap.Int64("revision", rev))
-	} else {
-		log.Info("global checkpoint watch channel created",
 			zap.String("category", "log backup advancer"),
 			zap.String("key", redactedKey),
 			zap.Uint64("current-checkpoint", current),
@@ -430,21 +419,7 @@ func (t MetaDataClient) waitCheckpointEvent(
 				if err != nil {
 					return err
 				}
-				log.Info("received global checkpoint event",
-					zap.String("category", "log backup advancer"),
-					zap.String("key", redactedKey),
-					zap.Uint64("current-checkpoint", current),
-					zap.Uint64("event-checkpoint", checkpoint),
-					zap.Int64("revision", rev),
-					zap.Int64("event-revision", event.Kv.ModRevision))
 				if checkpoint > current {
-					log.Info("global checkpoint advanced",
-						zap.String("category", "log backup advancer"),
-						zap.String("key", redactedKey),
-						zap.Uint64("current-checkpoint", current),
-						zap.Uint64("event-checkpoint", checkpoint),
-						zap.Int64("revision", rev),
-						zap.Int64("event-revision", event.Kv.ModRevision))
 					return nil
 				}
 			}
