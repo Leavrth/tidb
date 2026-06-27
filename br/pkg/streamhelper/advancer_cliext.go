@@ -521,24 +521,138 @@ func parseGlobalCheckpointValue(value []byte) (uint64, error) {
 
 func (t AdvancerExt) UploadV3GlobalCheckpointForTask(ctx context.Context, taskName string, checkpoint uint64) error {
 	key := GlobalCheckpointOf(taskName)
-	value := string(encodeUint64(checkpoint))
-	oldValue, err := t.GetGlobalCheckpointForTask(ctx, taskName)
-	if err != nil {
+	if err := t.uploadGlobalCheckpointWithRetry(ctx, taskName, key, checkpoint); err != nil {
 		return err
 	}
+	return nil
+}
 
-	if checkpoint < oldValue {
-		log.Warn("skipping upload global checkpoint", zap.String("category", "log backup advancer"),
-			zap.Uint64("old", oldValue), zap.Uint64("new", checkpoint))
+func (t AdvancerExt) uploadGlobalCheckpointWithRetry(
+	ctx context.Context,
+	taskName string,
+	key string,
+	checkpoint uint64,
+) error {
+	value := string(encodeUint64(checkpoint))
+	redactedKey := redact.Key([]byte(key))
+	var lastErr error
+	for attempt, timeout := range metadataRequestTimeouts {
+		getCtx, cancelGet := context.WithTimeout(ctx, timeout)
+		getResp, err := t.KV.Get(getCtx, key)
+		cancelGet()
+		if err != nil {
+			lastErr = err
+			retryable := attempt+1 < len(metadataRequestTimeouts) &&
+				isRetryableMetadataRequestError(ctx, err)
+			log.Warn("failed to get global checkpoint before uploading",
+				zap.String("category", "log backup advancer"),
+				zap.String("key", redactedKey),
+				zap.String("task", taskName),
+				zap.Uint64("checkpoint", checkpoint),
+				zap.Int("attempt", attempt+1),
+				zap.Int("max-attempts", len(metadataRequestTimeouts)),
+				zap.Bool("retry", retryable),
+				zap.Duration("timeout", timeout),
+				logutil.ShortError(err))
+			if retryable {
+				continue
+			}
+			return err
+		}
+
+		compare := clientv3.Compare(clientv3.CreateRevision(key), "=", 0)
+		if len(getResp.Kvs) != 0 {
+			firstKV := getResp.Kvs[0]
+			current, err := parseGlobalCheckpointValue(firstKV.Value)
+			if err != nil {
+				return err
+			}
+			if current > checkpoint {
+				log.Warn("skipping upload global checkpoint", zap.String("category", "log backup advancer"),
+					zap.Uint64("old", current), zap.Uint64("new", checkpoint))
+				return nil
+			}
+			if current == checkpoint {
+				metrics.LastCheckpoint.WithLabelValues(taskName).Set(float64(checkpoint))
+				return nil
+			}
+			compare = clientv3.Compare(clientv3.ModRevision(key), "=", firstKV.ModRevision)
+		}
+
+		requestCtx, cancelRequest := context.WithTimeout(ctx, timeout)
+		var resp *clientv3.TxnResponse
+		failpoint.Inject("advancer_upload_global_checkpoint_request_timeout", func(val failpoint.Value) {
+			err = context.DeadlineExceeded
+		})
+		if err == nil {
+			resp, err = t.KV.Txn(requestCtx).
+				If(compare).
+				Then(clientv3.OpPut(key, value)).
+				Else(clientv3.OpGet(key)).
+				Commit()
+			if err == nil {
+				failpoint.Inject("advancer_upload_global_checkpoint_commit_timeout", func(val failpoint.Value) {
+					err = context.DeadlineExceeded
+				})
+			}
+		}
+		cancelRequest()
+		if err != nil {
+			lastErr = err
+			retryable := attempt+1 < len(metadataRequestTimeouts) &&
+				isRetryableMetadataRequestError(ctx, err)
+			log.Warn("failed to upload global checkpoint to metadata store",
+				zap.String("category", "log backup advancer"),
+				zap.String("key", redactedKey),
+				zap.String("task", taskName),
+				zap.Uint64("checkpoint", checkpoint),
+				zap.Int("attempt", attempt+1),
+				zap.Int("max-attempts", len(metadataRequestTimeouts)),
+				zap.Bool("retry", retryable),
+				zap.Duration("timeout", timeout),
+				logutil.ShortError(err))
+			if retryable {
+				continue
+			}
+			return err
+		}
+		if !resp.Succeeded {
+			if len(resp.Responses) == 0 {
+				return errors.Annotatef(berrors.ErrPiTRMalformedMetadata,
+					"unexpected empty global checkpoint upload response for key %s",
+					redactedKey)
+			}
+			rangeResp := resp.Responses[0].GetResponseRange()
+			if rangeResp == nil || len(rangeResp.Kvs) == 0 {
+				return errors.Annotatef(berrors.ErrPiTRMalformedMetadata,
+					"unexpected global checkpoint upload response for key %s",
+					redactedKey)
+			}
+			current, err := parseGlobalCheckpointValue(rangeResp.Kvs[0].Value)
+			if err != nil {
+				return err
+			}
+			if current > checkpoint {
+				log.Warn("skipping upload global checkpoint", zap.String("category", "log backup advancer"),
+					zap.Uint64("old", current), zap.Uint64("new", checkpoint))
+				return nil
+			}
+			if current == checkpoint {
+				metrics.LastCheckpoint.WithLabelValues(taskName).Set(float64(checkpoint))
+				return nil
+			}
+			lastErr = errors.Errorf(
+				"global checkpoint changed while uploading, current checkpoint %d is less than target %d",
+				current, checkpoint)
+			if attempt+1 < len(metadataRequestTimeouts) {
+				continue
+			}
+			return lastErr
+		}
+		metrics.LastCheckpoint.WithLabelValues(taskName).Set(float64(checkpoint))
 		return nil
 	}
-
-	_, err = t.KV.Put(ctx, key, value)
-	if err != nil {
-		return err
-	}
-	metrics.LastCheckpoint.WithLabelValues(taskName).Set(float64(checkpoint))
-	return nil
+	return lastErr
 }
 
 func (t AdvancerExt) ClearV3GlobalCheckpointForTask(ctx context.Context, taskName string) error {
