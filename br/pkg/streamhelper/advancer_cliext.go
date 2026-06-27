@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/golang/protobuf/proto"
@@ -73,6 +74,7 @@ type AdvancerExt struct {
 var (
 	// etcd's default periodic watch progress is too sparse for failover, so request it proactively.
 	metadataWatchProgressInterval = 30 * time.Second
+	metadataWatchCreateTimeout    = 5 * time.Second
 	metadataWatchIdleTimeout      = 90 * time.Second
 )
 
@@ -170,8 +172,9 @@ func (t AdvancerExt) eventFromWatch(ctx context.Context, resp clientv3.WatchResp
 }
 
 func (t AdvancerExt) startListen(ctx context.Context, rev int64, ch chan<- TaskEvent) {
-	taskCh := t.Client.Watcher.Watch(ctx, PrefixOfTask(), clientv3.WithPrefix(), clientv3.WithRev(rev))
-	pauseCh := t.Client.Watcher.Watch(ctx, PrefixOfPause(), clientv3.WithPrefix(), clientv3.WithRev(rev))
+	watcher := t.getWatcher()
+	taskCh := watcher.Watch(ctx, PrefixOfTask(), clientv3.WithPrefix(), clientv3.WithRev(rev))
+	pauseCh := watcher.Watch(ctx, PrefixOfPause(), clientv3.WithPrefix(), clientv3.WithRev(rev))
 
 	// inner function def
 	handleResponse := func(resp clientv3.WatchResponse) bool {
@@ -335,9 +338,43 @@ func (t MetaDataClient) waitCheckpointEvent(
 	current uint64,
 	rev int64,
 ) error {
+	redactedKey := redact.Key([]byte(key))
+	log.Info("start waiting for global checkpoint event",
+		zap.String("category", "log backup advancer"),
+		zap.String("key", redactedKey),
+		zap.Uint64("current-checkpoint", current),
+		zap.Int64("revision", rev))
 	watchCtx, cancelWatch := context.WithCancel(clientv3.WithRequireLeader(ctx))
 	defer cancelWatch()
-	watchCh := t.Watcher.Watch(watchCtx, key, clientv3.WithRev(rev), clientv3.WithProgressNotify())
+	// etcd Watch may block before returning the watch channel when creating the watch stream.
+	watcher := t.getWatcher()
+	var watchCreateTimedOut atomic.Bool
+	watchCreateTimer := time.AfterFunc(metadataWatchCreateTimeout, func() {
+		watchCreateTimedOut.Store(true)
+		log.Warn("etcd watch creation timed out, resetting metadata watcher",
+			zap.String("category", "log backup advancer"),
+			zap.String("key", redactedKey),
+			zap.Uint64("current-checkpoint", current),
+			zap.Int64("revision", rev),
+			zap.Duration("timeout", metadataWatchCreateTimeout))
+		cancelWatch()
+		t.resetWatcher()
+	})
+	watchCh := watcher.Watch(watchCtx, key, clientv3.WithRev(rev), clientv3.WithProgressNotify())
+	watchCreateTimer.Stop()
+	if watchCreateTimedOut.Load() {
+		log.Warn("global checkpoint watch returned after creation timeout",
+			zap.String("category", "log backup advancer"),
+			zap.String("key", redactedKey),
+			zap.Uint64("current-checkpoint", current),
+			zap.Int64("revision", rev))
+	} else {
+		log.Info("global checkpoint watch channel created",
+			zap.String("category", "log backup advancer"),
+			zap.String("key", redactedKey),
+			zap.Uint64("current-checkpoint", current),
+			zap.Int64("revision", rev))
+	}
 	progressTicker := time.NewTicker(metadataWatchProgressInterval)
 	defer progressTicker.Stop()
 	idleTimer := time.NewTimer(metadataWatchIdleTimeout)
@@ -345,13 +382,31 @@ func (t MetaDataClient) waitCheckpointEvent(
 	for {
 		select {
 		case <-ctx.Done():
+			log.Info("stop waiting for global checkpoint event because context is done",
+				zap.String("category", "log backup advancer"),
+				zap.String("key", redactedKey),
+				zap.Uint64("current-checkpoint", current),
+				zap.Int64("revision", rev),
+				logutil.ShortError(ctx.Err()))
 			return ctx.Err()
 		case resp, ok := <-watchCh:
 			resetWatchIdleTimer(idleTimer)
 			if !ok {
+				log.Warn("global checkpoint watch channel closed",
+					zap.String("category", "log backup advancer"),
+					zap.String("key", redactedKey),
+					zap.Uint64("current-checkpoint", current),
+					zap.Int64("revision", rev))
 				return berrors.ErrPiTRCheckpointWatchRestart.GenWithStackByArgs()
 			}
 			if err := resp.Err(); err != nil {
+				log.Warn("global checkpoint watch response has error",
+					zap.String("category", "log backup advancer"),
+					zap.String("key", redactedKey),
+					zap.Uint64("current-checkpoint", current),
+					zap.Int64("revision", rev),
+					zap.Int64("compact-revision", resp.CompactRevision),
+					logutil.ShortError(err))
 				if resp.CompactRevision != 0 {
 					return berrors.ErrPiTRCheckpointWatchRestart.GenWithStackByArgs()
 				}
@@ -365,15 +420,41 @@ func (t MetaDataClient) waitCheckpointEvent(
 				if err != nil {
 					return err
 				}
+				log.Info("received global checkpoint event",
+					zap.String("category", "log backup advancer"),
+					zap.String("key", redactedKey),
+					zap.Uint64("current-checkpoint", current),
+					zap.Uint64("event-checkpoint", checkpoint),
+					zap.Int64("revision", rev),
+					zap.Int64("event-revision", event.Kv.ModRevision))
 				if checkpoint > current {
+					log.Info("global checkpoint advanced",
+						zap.String("category", "log backup advancer"),
+						zap.String("key", redactedKey),
+						zap.Uint64("current-checkpoint", current),
+						zap.Uint64("event-checkpoint", checkpoint),
+						zap.Int64("revision", rev),
+						zap.Int64("event-revision", event.Kv.ModRevision))
 					return nil
 				}
 			}
 		case <-progressTicker.C:
-			if err := requestWatchProgress(watchCtx, t.Watcher); err != nil {
+			if err := requestWatchProgress(watchCtx, watcher); err != nil {
+				log.Warn("failed to request global checkpoint watch progress",
+					zap.String("category", "log backup advancer"),
+					zap.String("key", redactedKey),
+					zap.Uint64("current-checkpoint", current),
+					zap.Int64("revision", rev),
+					logutil.ShortError(err))
 				return err
 			}
 		case <-idleTimer.C:
+			log.Warn("global checkpoint watch idle timeout",
+				zap.String("category", "log backup advancer"),
+				zap.String("key", redactedKey),
+				zap.Uint64("current-checkpoint", current),
+				zap.Int64("revision", rev),
+				zap.Duration("timeout", metadataWatchIdleTimeout))
 			return watchIdleTimeoutError("global checkpoint")
 		}
 	}
