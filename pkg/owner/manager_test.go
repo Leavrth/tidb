@@ -330,6 +330,43 @@ func TestCluster(t *testing.T) {
 	require.Equal(t, op, owner.OpNone)
 }
 
+func TestNonFIFOCampaignDoesNotQueueCandidates(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("integration.NewClusterV3 will create file contains a colon which is not allowed on Windows")
+	}
+	integration.BeforeTestExternal(t)
+
+	tInfo := newTestInfo(t)
+	defer tInfo.Close(t)
+
+	ctx := context.Background()
+	ownerPath := "/owner/non-fifo-key"
+	ownerMgr := owner.NewOwnerManager(ctx, tInfo.client, "advancer", "1", ownerPath, owner.WithNonFIFOCampaign())
+	defer ownerMgr.Close()
+	require.NoError(t, ownerMgr.CampaignOwner())
+	require.True(t, checkOwner(ownerMgr, true))
+
+	waitingMgr := owner.NewOwnerManager(ctx, tInfo.client, "advancer", "2", ownerPath, owner.WithNonFIFOCampaign())
+	defer waitingMgr.Close()
+	require.NoError(t, waitingMgr.CampaignOwner())
+	require.False(t, checkOwner(waitingMgr, false))
+
+	require.Eventually(t, func() bool {
+		resp, err := tInfo.client.Get(ctx, ownerPath+"/", clientv3.WithPrefix())
+		if err != nil {
+			return false
+		}
+		if len(resp.Kvs) != 1 {
+			return false
+		}
+		return string(resp.Kvs[0].Value) == "1"
+	}, 5*time.Second, 10*time.Millisecond)
+
+	ownerMgr.Close()
+	require.False(t, checkOwner(ownerMgr, false))
+	require.True(t, checkOwner(waitingMgr, true))
+}
+
 func TestWatchOwner(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("integration.NewClusterV3 will create file contains a colon which is not allowed on Windows")

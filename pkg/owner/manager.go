@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"strconv"
 	"sync"
@@ -126,6 +127,27 @@ type DDLOwnerChecker interface {
 	IsOwner() bool
 }
 
+type campaignMode byte
+
+const (
+	fifoCampaign campaignMode = iota
+	nonFIFOCampaign
+)
+
+const nonFIFOCampaignMaxBackoff = 200 * time.Millisecond
+
+// ManagerOption is used to customize the owner manager.
+type ManagerOption func(*ownerManager)
+
+// WithNonFIFOCampaign makes the manager avoid queuing behind the current owner.
+// If a campaign attempt loses, the manager removes its candidate key and retries
+// after the current owner leaves, so the next owner is selected by a fresh race.
+func WithNonFIFOCampaign() ManagerOption {
+	return func(m *ownerManager) {
+		m.campaignMode = nonFIFOCampaign
+	}
+}
+
 // ownerManager represents the structure which is used for electing owner.
 type ownerManager struct {
 	id             string // id is the ID of the manager.
@@ -139,13 +161,14 @@ type ownerManager struct {
 	wg             sync.WaitGroup
 	campaignCancel context.CancelFunc
 
-	listener Listener
-	etcdSes  *concurrency.Session
+	listener     Listener
+	etcdSes      *concurrency.Session
+	campaignMode campaignMode
 }
 
 // NewOwnerManager creates a new Manager.
-func NewOwnerManager(ctx context.Context, etcdCli *clientv3.Client, prompt, id, key string) Manager {
-	return &ownerManager{
+func NewOwnerManager(ctx context.Context, etcdCli *clientv3.Client, prompt, id, key string, opts ...ManagerOption) Manager {
+	m := &ownerManager{
 		etcdCli:      etcdCli,
 		id:           id,
 		key:          key,
@@ -154,6 +177,10 @@ func NewOwnerManager(ctx context.Context, etcdCli *clientv3.Client, prompt, id, 
 		logger:       logutil.BgLogger().With(zap.String("key", key), zap.String("id", id)),
 		sessionLease: atomicutil.NewInt64(0),
 	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
 }
 
 // ID implements Manager.ID interface.
@@ -402,9 +429,7 @@ func (m *ownerManager) campaignLoop(campaignContext context.Context) {
 }
 
 func (m *ownerManager) campaignAndWatch(ctx context.Context) error {
-	elec := concurrency.NewElection(m.etcdSes, m.key)
-	failpoint.InjectCall("beforeElectionCampaign", m.etcdSes)
-	err := elec.Campaign(ctx, m.id)
+	elec, err := m.campaign(ctx)
 	if err != nil {
 		return err
 	}
@@ -423,6 +448,132 @@ func (m *ownerManager) campaignAndWatch(ctx context.Context) error {
 	metrics.CampaignOwnerCounter.WithLabelValues(m.prompt, metrics.NoLongerOwner).Inc()
 	m.logger.Info("is not the owner")
 	return err
+}
+
+func (m *ownerManager) campaign(ctx context.Context) (*concurrency.Election, error) {
+	if m.campaignMode == nonFIFOCampaign {
+		return m.campaignNonFIFO(ctx)
+	}
+
+	elec := concurrency.NewElection(m.etcdSes, m.key)
+	failpoint.InjectCall("beforeElectionCampaign", m.etcdSes)
+	return elec, elec.Campaign(ctx, m.id)
+}
+
+func (m *ownerManager) campaignNonFIFO(ctx context.Context) (*concurrency.Election, error) {
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-m.etcdSes.Done():
+			return nil, errors.New("etcd session is done")
+		default:
+		}
+
+		ownerKey, _, _, currRev, _, err := getOwnerInfo(ctx, m.etcdCli, m.key)
+		if err == nil {
+			if err = m.watchOwner(ctx, m.etcdSes, ownerKey, currRev); err != nil {
+				return nil, err
+			}
+			if err = m.nonFIFOCampaignBackoff(ctx); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if !terror.ErrorEqual(err, concurrency.ErrElectionNoLeader) {
+			return nil, errors.Trace(err)
+		}
+		if err = m.nonFIFOCampaignBackoff(ctx); err != nil {
+			return nil, err
+		}
+
+		failpoint.InjectCall("beforeElectionCampaign", m.etcdSes)
+		campaignKey, campaignRev, err := m.putCampaignKey(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		ownerKey, ownerID, _, currRev, _, err := getOwnerInfo(ctx, m.etcdCli, m.key)
+		if err != nil {
+			_ = m.cleanupCampaignKey(m.etcdCli.Ctx(), campaignKey, campaignRev)
+			return nil, errors.Trace(err)
+		}
+		if ownerKey == campaignKey && string(ownerID) == m.id {
+			return concurrency.ResumeElection(m.etcdSes, m.key+"/", campaignKey, campaignRev), nil
+		}
+
+		if err = m.cleanupCampaignKey(m.etcdCli.Ctx(), campaignKey, campaignRev); err != nil {
+			return nil, err
+		}
+		if err = m.watchOwner(ctx, m.etcdSes, ownerKey, currRev); err != nil {
+			return nil, err
+		}
+		if err = m.nonFIFOCampaignBackoff(ctx); err != nil {
+			return nil, err
+		}
+	}
+}
+
+func (m *ownerManager) putCampaignKey(ctx context.Context) (string, int64, error) {
+	lease := m.etcdSes.Lease()
+	campaignKey := fmt.Sprintf("%s/%x", m.key, lease)
+	txn := m.etcdCli.Txn(ctx).If(clientv3.Compare(clientv3.CreateRevision(campaignKey), "=", 0)).
+		Then(clientv3.OpPut(campaignKey, m.id, clientv3.WithLease(lease))).
+		Else(clientv3.OpGet(campaignKey))
+	resp, err := txn.Commit()
+	if err != nil {
+		return "", 0, err
+	}
+	if resp.Succeeded {
+		return campaignKey, resp.Header.Revision, nil
+	}
+	kv := resp.Responses[0].GetResponseRange().Kvs[0]
+	if string(kv.Value) == m.id {
+		return campaignKey, kv.CreateRevision, nil
+	}
+	return "", 0, errors.Errorf("campaign key %s is occupied by %s", campaignKey, string(kv.Value))
+}
+
+func (m *ownerManager) cleanupCampaignKey(ctx context.Context, campaignKey string, campaignRev int64) error {
+	err := m.deleteCampaignKey(ctx, campaignKey, campaignRev)
+	if err == nil {
+		return nil
+	}
+	if closeErr := m.etcdSes.Close(); closeErr != nil {
+		m.logger.Warn("close session after failed non-FIFO campaign key cleanup failed",
+			zap.String("campaignKey", campaignKey), zap.Error(closeErr))
+	}
+	return err
+}
+
+func (m *ownerManager) deleteCampaignKey(ctx context.Context, campaignKey string, campaignRev int64) error {
+	childCtx, cancel := context.WithTimeout(ctx, keyOpDefaultTimeout)
+	defer cancel()
+	resp, err := m.etcdCli.Txn(childCtx).
+		If(clientv3.Compare(clientv3.CreateRevision(campaignKey), "=", campaignRev)).
+		Then(clientv3.OpDelete(campaignKey)).
+		Commit()
+	if err != nil {
+		m.logger.Warn("delete non-FIFO campaign key failed",
+			zap.String("campaignKey", campaignKey), zap.Error(err))
+		return errors.Trace(err)
+	}
+	if !resp.Succeeded {
+		m.logger.Info("non-FIFO campaign key is already gone", zap.String("campaignKey", campaignKey))
+	}
+	return nil
+}
+
+func (*ownerManager) nonFIFOCampaignBackoff(ctx context.Context) error {
+	backoff := time.Duration(rand.Int64N(int64(nonFIFOCampaignMaxBackoff)))
+	timer := time.NewTimer(backoff)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (m *ownerManager) closeSession() {

@@ -59,5 +59,5 @@ func (c *CheckpointAdvancer) OnStop() {
 
 func OwnerManagerForLogBackup(ctx context.Context, etcdCli *clientv3.Client) owner.Manager {
 	id := uuid.New()
-	return owner.NewOwnerManager(ctx, etcdCli, ownerPrompt, id.String(), ownerPath)
+	return owner.NewOwnerManager(ctx, etcdCli, ownerPrompt, id.String(), ownerPath, owner.WithNonFIFOCampaign())
 }
