@@ -769,6 +769,23 @@ type tidbGlueSession struct {
 	se sessionctx.Context
 }
 
+var _ glue.MaterializedViewSession = (*tidbGlueSession)(nil)
+
+// GetCreateMaterializedView implements glue.MaterializedViewSession.
+func (gs *tidbGlueSession) GetCreateMaterializedView(table, base *model.TableInfo) (string, error) {
+	return (&BRIEMaterializedViewSession{Context: gs.se}).GetCreateMaterializedView(table, base)
+}
+
+// GetMaterializedViewRefreshSQL implements glue.MaterializedViewSession.
+func (gs *tidbGlueSession) GetMaterializedViewRefreshSQL(table *model.TableInfo) (string, error) {
+	return (&BRIEMaterializedViewSession{Context: gs.se}).GetMaterializedViewRefreshSQL(table)
+}
+
+// GetMaterializedViewIndexSQLs implements glue.MaterializedViewSession.
+func (gs *tidbGlueSession) GetMaterializedViewIndexSQLs(ctx context.Context, dbName pmodel.CIStr, table *model.TableInfo) ([]string, error) {
+	return (&BRIEMaterializedViewSession{Context: gs.se}).GetMaterializedViewIndexSQLs(ctx, dbName, table)
+}
+
 // Execute implements glue.Session
 // These queries execute without privilege checking, since the calling statements
 // such as BACKUP and RESTORE have already been privilege checked.

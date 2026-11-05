@@ -68,6 +68,13 @@ type BatchCreateTableSession interface {
 		cs ...ddl.CreateTableOption) error
 }
 
+// MaterializedViewSession reconstructs logical MV definitions during restore.
+type MaterializedViewSession interface {
+	GetCreateMaterializedView(table, base *model.TableInfo) (string, error)
+	GetMaterializedViewRefreshSQL(table *model.TableInfo) (string, error)
+	GetMaterializedViewIndexSQLs(ctx context.Context, dbName pmodel.CIStr, table *model.TableInfo) ([]string, error)
+}
+
 // Progress is an interface recording the current execution progress.
 type Progress interface {
 	// Inc increases the progress. This method must be goroutine-safe, and can

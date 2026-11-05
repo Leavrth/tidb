@@ -1114,6 +1114,7 @@ func (rc *LogClient) generateDBReplacesFromFullBackupStorage(
 	ctx context.Context,
 	cfg *InitSchemaConfig,
 	cipherInfo *backuppb.CipherInfo,
+	recorder *stream.MaterializedViewRecorder,
 ) (map[stream.UpstreamID]*stream.DBReplace, error) {
 	dbReplaces := make(map[stream.UpstreamID]*stream.DBReplace)
 	if cfg.FullBackupStorage == nil {
@@ -1150,6 +1151,18 @@ func (rc *LogClient) generateDBReplacesFromFullBackupStorage(
 			// If the db is empty, skip it.
 			continue
 		}
+		recorder.Seed(t.DB.ID, t.Info)
+		if recorder.Skipped[t.Info.ID] {
+			// MV/mlog schemas and data are skipped during replay and rebuilt through DDL
+			// afterward. Reserve IDs for ID-map construction and delete-range rewriting;
+			// these IDs are not used by the rebuilt objects.
+			newID, err := rc.GenGlobalID(ctx)
+			if err != nil {
+				return nil, err
+			}
+			dbReplace.TableMap[t.Info.ID] = stream.NewTableReplace(t.Info.Name.O, newID)
+			continue
+		}
 		newTableInfo, err := restore.GetTableSchema(rc.GetDomain(), dbName, t.Info.Name)
 		if err != nil {
 			log.Info("table not existed", zap.String("tablename", dbName.String()+"."+t.Info.Name.String()))
@@ -1173,6 +1186,7 @@ func (rc *LogClient) InitSchemasReplaceForDDL(
 	cfg *InitSchemaConfig,
 	cipherInfo *backuppb.CipherInfo,
 ) (*stream.SchemasReplace, error) {
+	recorder := stream.NewMaterializedViewRecorder()
 	var (
 		err    error
 		dbMaps []*backuppb.PitrDBMap
@@ -1189,6 +1203,12 @@ func (rc *LogClient) InitSchemasReplaceForDDL(
 		dbMaps, err = rc.initSchemasMap(ctx, rc.restoreTS)
 		if err != nil {
 			return nil, errors.Trace(err)
+		}
+		if rc.useCheckpoint && len(dbMaps) > 0 {
+			recorder, err = checkpoint.LoadCheckpointMaterializedViews(ctx, rc.unsafeSession.GetSessionCtx().GetRestrictedSQLExecutor())
+			if err != nil {
+				return nil, errors.Annotate(err, "failed to load materialized view definitions saved with the ID map")
+			}
 		}
 	}
 
@@ -1216,7 +1236,7 @@ func (rc *LogClient) InitSchemasReplaceForDDL(
 	if len(dbMaps) <= 0 {
 		log.Info("no id maps, build the table replaces from cluster and full backup schemas")
 		needConstructIdMap = true
-		dbReplaces, err = rc.generateDBReplacesFromFullBackupStorage(ctx, cfg, cipherInfo)
+		dbReplaces, err = rc.generateDBReplacesFromFullBackupStorage(ctx, cfg, cipherInfo, recorder)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -1244,7 +1264,19 @@ func (rc *LogClient) InitSchemasReplaceForDDL(
 	rp := stream.NewSchemasReplace(
 		dbReplaces, needConstructIdMap, cfg.TiFlashRecorder, rc.currentTS, cfg.TableFilter, rc.GenGlobalID, rc.GenGlobalIDs,
 		rc.RecordDeleteRange)
+	rp.MaterializedViewRecorder = recorder
 	return rp, nil
+}
+
+// CheckpointMaterializedViewRepair marks replay/index/TiFlash repair complete before
+// native DDL creates new metadata that must not be overwritten on retries.
+func (rc *LogClient) CheckpointMaterializedViewRepair(ctx context.Context) error {
+	if !rc.useCheckpoint {
+		return nil
+	}
+	return checkpoint.UpdateCheckpointProgress(ctx, rc.unsafeSession, &checkpoint.CheckpointProgress{
+		Progress: checkpoint.InMaterializedViewRepair,
+	})
 }
 
 func SortMetaKVFiles(files []*backuppb.DataFileInfo) []*backuppb.DataFileInfo {
@@ -1375,6 +1407,8 @@ func (rc *LogClient) PreConstructAndSaveIDMap(
 		return errors.Trace(err)
 	}
 
+	sr.MaterializedViewRecorder.FinishRecording()
+
 	if err := rc.saveIDMap(ctx, sr); err != nil {
 		return errors.Trace(err)
 	}
@@ -1391,6 +1425,9 @@ func (rc *LogClient) constructIDMap(
 		rewriteLock.Lock()
 		defer rewriteLock.Unlock()
 		for _, entry := range entries {
+			if err := sr.MaterializedViewRecorder.RecordEntry(&entry.E, cf); err != nil {
+				return err
+			}
 			if _, err := sr.RewriteKvEntry(&entry.E, cf); err != nil {
 				return errors.Trace(err)
 			}
@@ -2011,12 +2048,12 @@ func writeRepairIngestIndexSQLFile(
 }
 
 // RepairIngestIndex drops the indexes from IngestRecorder and re-adds them,
-// or writes the add-index SQLs to external storage when addIndexSQLStorage is set.
+// or writes the add-index SQLs to external storage when repairSQLStorage is set.
 func (rc *LogClient) RepairIngestIndex(
 	ctx context.Context,
 	ingestRecorder *ingestrec.IngestRecorder,
 	g glue.Glue,
-	addIndexSQLStorage storage.ExternalStorage,
+	repairSQLStorage storage.ExternalStorage,
 ) error {
 	sqls, fkSqls, fromCheckpoint, err := rc.generateRepairIngestIndexSQLs(ctx, ingestRecorder)
 	if err != nil {
@@ -2141,7 +2178,7 @@ func (rc *LogClient) RepairIngestIndex(
 					return errors.Trace(err)
 				}
 			}
-			if addIndexSQLStorage != nil {
+			if repairSQLStorage != nil {
 				w.Increment()
 				return nil
 			}
@@ -2161,8 +2198,8 @@ func (rc *LogClient) RepairIngestIndex(
 	if err := eg.Wait(); err != nil {
 		return errors.Trace(err)
 	}
-	if addIndexSQLStorage != nil {
-		if err := writeRepairIngestIndexSQLFile(ctx, addIndexSQLStorage, sqls, fkSqls); err != nil {
+	if repairSQLStorage != nil {
+		if err := writeRepairIngestIndexSQLFile(ctx, repairSQLStorage, sqls, fkSqls); err != nil {
 			return errors.Trace(err)
 		}
 		return nil
@@ -2295,6 +2332,9 @@ func (rc *LogClient) saveIDMap(
 	}
 
 	if rc.useCheckpoint {
+		if err := checkpoint.SaveCheckpointMaterializedViews(ctx, rc.unsafeSession, sr.MaterializedViewRecorder); err != nil {
+			return errors.Trace(err)
+		}
 		log.Info("save checkpoint task info with InLogRestoreAndIdMapPersist status")
 		if err := checkpoint.SaveCheckpointProgress(ctx, rc.unsafeSession, &checkpoint.CheckpointProgress{
 			Progress: checkpoint.InLogRestoreAndIdMapPersist,

@@ -43,7 +43,7 @@ func TestShiftTS(t *testing.T) {
 	require.Equal(t, delta, streamShiftDuration)
 }
 
-func TestShouldOpenPiTRAddIndexSQLStorage(t *testing.T) {
+func TestShouldOpenPiTRRepairSQLStorage(t *testing.T) {
 	tests := []struct {
 		name string
 		cfg  RestoreConfig
@@ -57,23 +57,23 @@ func TestShouldOpenPiTRAddIndexSQLStorage(t *testing.T) {
 		{
 			name: "full flow opens storage",
 			cfg: RestoreConfig{
-				PiTRAddIndexSQLStorage: "local:///tmp/pitr-add-index",
+				PiTRRepairSQLStorage: "local:///tmp/pitr-repair",
 			},
 			want: true,
 		},
 		{
 			name: "phase 1 does not open storage",
 			cfg: RestoreConfig{
-				PiTRAddIndexSQLStorage: "local:///tmp/pitr-add-index",
-				RestorePhase:           1,
+				PiTRRepairSQLStorage: "local:///tmp/pitr-repair",
+				RestorePhase:         1,
 			},
 			want: false,
 		},
 		{
 			name: "phase 2 opens storage",
 			cfg: RestoreConfig{
-				PiTRAddIndexSQLStorage: "local:///tmp/pitr-add-index",
-				RestorePhase:           2,
+				PiTRRepairSQLStorage: "local:///tmp/pitr-repair",
+				RestorePhase:         2,
 			},
 			want: true,
 		},
@@ -81,7 +81,7 @@ func TestShouldOpenPiTRAddIndexSQLStorage(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, shouldOpenPiTRAddIndexSQLStorage(&tt.cfg))
+			require.Equal(t, tt.want, shouldOpenPiTRRepairSQLStorage(&tt.cfg))
 		})
 	}
 }

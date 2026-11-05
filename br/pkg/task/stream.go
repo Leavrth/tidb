@@ -1246,8 +1246,8 @@ func RunStreamRestore(
 		return errors.Trace(err)
 	}
 	// index ingestion is not captured by regular log backup, so we need to manually ingest again
-	if shouldOpenPiTRAddIndexSQLStorage(cfg) {
-		_, cfg.AddIndexSQLStorage, err = GetStorage(ctx, cfg.PiTRAddIndexSQLStorage, &cfg.Config)
+	if shouldOpenPiTRRepairSQLStorage(cfg) {
+		_, cfg.RepairSQLStorage, err = GetStorage(ctx, cfg.PiTRRepairSQLStorage, &cfg.Config)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -1328,8 +1328,8 @@ func RunStreamRestore(
 	return nil
 }
 
-func shouldOpenPiTRAddIndexSQLStorage(cfg *RestoreConfig) bool {
-	return len(cfg.PiTRAddIndexSQLStorage) > 0 && cfg.RestorePhase != 1
+func shouldOpenPiTRRepairSQLStorage(cfg *RestoreConfig) bool {
+	return len(cfg.PiTRRepairSQLStorage) > 0 && cfg.RestorePhase != 1
 }
 
 func restoreStream(
@@ -1509,7 +1509,7 @@ func restoreStream(
 	}
 	// load the id maps only when the checkpoint mode is used and not the first execution
 	newTask := true
-	if taskInfo != nil && taskInfo.Progress == checkpoint.InLogRestoreAndIdMapPersist {
+	if taskInfo != nil && taskInfo.Progress >= checkpoint.InLogRestoreAndIdMapPersist {
 		newTask = false
 	}
 	// get the schemas ID replace information.
@@ -1533,6 +1533,25 @@ func restoreStream(
 		cfg.tiflashRecorder.AddTable(tableInfo.ID, *tableInfo.TiFlashReplica)
 		// Remove the replica firstly. Let's restore them at the end.
 		tableInfo.TiFlashReplica = nil
+	}
+
+	finishRestore := func() error {
+		// Native MV builds can use the restored TiFlash replicas.
+		if err := repairMaterializedViews(ctx, g, mgr.GetDomain(), cfg, schemasReplace); err != nil {
+			return errors.Annotate(err, "failed to rebuild materialized views")
+		}
+		return nil
+	}
+	// Definitions are already checkpointed with the ID map. The progress marker
+	// separately prevents replay from overwriting base links created by repair.
+	if cfg.RestorePhase != 1 && taskInfo != nil && taskInfo.Progress == checkpoint.InMaterializedViewRepair {
+		log.Info("resume materialized view rebuild after completed log replay")
+		if err := finishRestore(); err != nil {
+			return err
+		}
+		gcDisabledRestorable = true
+		rocksDBMaxBackgroundJobsRestorable = true
+		return nil
 	}
 
 	updateStats := func(kvCount uint64, size uint64) {
@@ -1577,6 +1596,9 @@ func restoreStream(
 	client.BuildMigrations(migs.Migs)
 
 	rewriteRules := initRewriteRules(schemasReplace)
+	for tableID := range schemasReplace.MaterializedViewRecorder.Skipped {
+		delete(rewriteRules, tableID)
+	}
 
 	ingestRecorder := schemasReplace.GetIngestRecorder()
 	if err := rangeFilterFromIngestRecorder(ingestRecorder, rewriteRules); err != nil {
@@ -1734,17 +1756,21 @@ func restoreStream(
 		return errors.Annotate(err, "failed to insert rows into gc_delete_range")
 	}
 
-	if err = client.RepairIngestIndex(ctx, ingestRecorder, g, cfg.AddIndexSQLStorage); err != nil {
+	if err = client.RepairIngestIndex(ctx, ingestRecorder, g, cfg.RepairSQLStorage); err != nil {
 		return errors.Annotate(err, "failed to repair ingest index")
 	}
-
 	if cfg.tiflashRecorder != nil {
 		sqls := cfg.tiflashRecorder.GenerateAlterTableDDLs(mgr.GetDomain().InfoSchema())
-		log.Info("Generating SQLs for restoring TiFlash Replica",
-			zap.Strings("sqls", sqls))
+		log.Info("Generating SQLs for restoring TiFlash Replica", zap.Strings("sqls", sqls))
 		if err := client.ResetTiflashReplicas(ctx, sqls, g); err != nil {
 			return errors.Annotate(err, "failed to reset tiflash replicas")
 		}
+	}
+	if err := client.CheckpointMaterializedViewRepair(ctx); err != nil {
+		return err
+	}
+	if err := finishRestore(); err != nil {
+		return err
 	}
 
 	failpoint.Inject("do-checksum-with-rewrite-rules", func(_ failpoint.Value) {
