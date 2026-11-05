@@ -2052,7 +2052,12 @@ func fetchShowCreateTable4MaterializedView(ctx sessionctx.Context, tb *model.Tab
 	}
 	buf.WriteString(")")
 	if len(tb.Comment) > 0 {
-		fmt.Fprintf(buf, " COMMENT = '%s'", format.OutputFormat(tb.Comment))
+		buf.WriteString(" COMMENT = ")
+		flags := parserformat.DefaultRestoreFlags
+		if !sqlMode.HasNoBackslashEscapesMode() {
+			flags |= parserformat.RestoreStringEscapeBackslash
+		}
+		parserformat.NewRestoreCtx(flags, buf).WriteString(tb.Comment)
 	}
 
 	if tb.ShardRowIDBits > 0 {

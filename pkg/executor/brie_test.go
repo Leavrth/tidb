@@ -26,12 +26,14 @@ import (
 	"github.com/pingcap/failpoint"
 	backuppb "github.com/pingcap/kvproto/pkg/brpb"
 	"github.com/pingcap/kvproto/pkg/encryptionpb"
+	"github.com/pingcap/tidb/br/pkg/glue"
 	"github.com/pingcap/tidb/pkg/executor/internal/exec"
 	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/parser"
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/auth"
+	pmodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/planner/core"
 	"github.com/pingcap/tidb/pkg/planner/core/resolve"
@@ -229,4 +231,42 @@ func TestBRIEBuilderOptions(t *testing.T) {
 	require.True(t, e.restoreCfg.WaitTiflashReady)
 	require.True(t, e.restoreCfg.WithSysTable)
 	require.True(t, e.restoreCfg.LoadStats)
+}
+
+func TestBRIEMaterializedViewSession(t *testing.T) {
+	ctx := mock.NewContext()
+	ctx.GetSessionVars().SQLMode = mysql.ModeNoBackslashEscapes
+	var session glue.Session = &tidbGlueSession{se: ctx}
+	definitions, supported := session.(glue.MaterializedViewSession)
+	require.True(t, supported, "SQL RESTORE must support logical materialized view reconstruction")
+	table := &model.TableInfo{
+		Name:    pmodel.NewCIStr("mv"),
+		Columns: []*model.ColumnInfo{{Name: pmodel.NewCIStr("a"), FieldType: *types.NewFieldType(mysql.TypeVarchar)}},
+		MaterializedView: &model.MaterializedViewInfo{
+			SQLContent:             `SELECT 'x\\y' AS a`,
+			RefreshNext:            `TIMESTAMP('2030-01-01') + INTERVAL LENGTH('x\\y') DAY`,
+			RefreshScheduleSQLMode: mysql.ModeNoBackslashEscapes,
+		},
+	}
+	create, err := definitions.GetCreateMaterializedView(table, nil)
+	require.NoError(t, err)
+	require.Contains(t, create, `AS SELECT 'x\y' AS `+"`a`")
+	require.Contains(t, create, `LENGTH('x\y')`)
+	refresh, err := definitions.GetMaterializedViewRefreshSQL(table)
+	require.NoError(t, err)
+	require.Contains(t, refresh, `LENGTH('x\y')`)
+	require.Equal(t, `SELECT 'x\\y' AS a`, table.MaterializedView.SQLContent)
+	log := &model.TableInfo{MaterializedViewLog: &model.MaterializedViewLogInfo{
+		PurgeNext: table.MaterializedView.RefreshNext,
+	}}
+	create, err = definitions.GetCreateMaterializedView(log, table)
+	require.NoError(t, err)
+	require.Contains(t, create, "CREATE MATERIALIZED VIEW LOG ON `mv`")
+	require.Contains(t, create, `LENGTH('x\y')`)
+	indexes, err := definitions.GetMaterializedViewIndexSQLs(context.Background(), pmodel.NewCIStr("test"), log)
+	require.NoError(t, err)
+	require.Empty(t, indexes)
+	table.MaterializedView.SQLContent = "SELECT 'unterminated"
+	_, err = definitions.GetCreateMaterializedView(table, nil)
+	require.Error(t, err)
 }
