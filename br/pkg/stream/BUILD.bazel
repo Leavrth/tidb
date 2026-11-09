@@ -4,6 +4,7 @@ go_library(
     name = "stream",
     srcs = [
         "decode_kv.go",
+        "materialized_view.go",
         "meta_kv.go",
         "rewrite_meta_rawkv.go",
         "search.go",
@@ -75,6 +76,7 @@ go_test(
         "//br/pkg/stream/backupmetas",
         "//br/pkg/streamhelper",
         "//pkg/ddl",
+        "//pkg/kv",
         "//pkg/meta",
         "//pkg/meta/model",
         "//pkg/parser/ast",

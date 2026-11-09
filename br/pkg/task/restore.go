@@ -98,8 +98,8 @@ const (
 	FlagStreamRestoreTS = "restored-ts"
 	// FlagStreamFullBackupStorage is used for log restore, represents the full backup storage.
 	FlagStreamFullBackupStorage = "full-backup-storage"
-	// FlagPiTRAddIndexSQLStorage is used for PITR to output add index SQLs instead of rebuilding indexes.
-	FlagPiTRAddIndexSQLStorage = "pitr-add-index-sql-storage"
+	// FlagPiTRRepairSQLStorage is used for PITR to export index and materialized-view repair SQLs.
+	FlagPiTRRepairSQLStorage = "pitr-repair-sql-storage"
 	// FlagPiTRBatchCount and FlagPiTRBatchSize are used for restore log with batch method.
 	FlagPiTRBatchCount  = "pitr-batch-count"
 	FlagPiTRBatchSize   = "pitr-batch-size"
@@ -267,9 +267,9 @@ type RestoreConfig struct {
 	// if it is empty, directly take restoring log justly.
 	FullBackupStorage string `json:"full-backup-storage" toml:"full-backup-storage"`
 
-	// PiTRAddIndexSQLStorage is the external storage used to output add index SQLs instead of rebuilding indexes.
-	PiTRAddIndexSQLStorage string                  `json:"pitr-add-index-sql-storage" toml:"pitr-add-index-sql-storage"`
-	AddIndexSQLStorage     storage.ExternalStorage `json:"-" toml:"-"`
+	// PiTRRepairSQLStorage is the external storage used to export index and materialized-view repair SQLs.
+	PiTRRepairSQLStorage string                  `json:"pitr-repair-sql-storage" toml:"pitr-repair-sql-storage"`
+	RepairSQLStorage     storage.ExternalStorage `json:"-" toml:"-"`
 
 	// AllowPITRFromIncremental indicates whether this restore should enter a compatibility mode for incremental restore.
 	// In this restore mode, the restore will not perform timestamp rewrite on the incremental data.
@@ -346,8 +346,8 @@ func DefineStreamRestoreFlags(command *cobra.Command) {
 		"support TSO or datetime, e.g. '400036290571534337' or '2018-05-11 01:42:23+0800'")
 	command.Flags().String(FlagStreamFullBackupStorage, "", "specify the backup full storage. "+
 		"fill it if want restore full backup before restore log.")
-	command.Flags().String(FlagPiTRAddIndexSQLStorage, "", "specify the external storage url where PITR add index SQLs are saved. "+
-		"When set, PITR drops incomplete indexes but does not rebuild them automatically; the SQLs are written to add-index.sql under this storage.")
+	command.Flags().String(FlagPiTRRepairSQLStorage, "", "specify the external storage url where PITR repair SQLs are saved. "+
+		"When set, PITR drops incomplete indexes and exports rebuild SQLs instead of creating indexes, materialized views or logs. Run add-index.sql, then materialized-views.sql when present.")
 	command.Flags().Uint32(FlagPiTRBatchCount, defaultPiTRBatchCount, "specify the batch count to restore log.")
 	command.Flags().Uint32(FlagPiTRBatchSize, defaultPiTRBatchSize, "specify the batch size to retore log.")
 	command.Flags().Uint32(FlagPiTRConcurrency, defaultPiTRConcurrency, "specify the concurrency to restore log.")
@@ -378,7 +378,7 @@ func (cfg *RestoreConfig) ParseStreamRestoreFlags(flags *pflag.FlagSet) error {
 	if cfg.FullBackupStorage, err = flags.GetString(FlagStreamFullBackupStorage); err != nil {
 		return errors.Trace(err)
 	}
-	if cfg.PiTRAddIndexSQLStorage, err = flags.GetString(FlagPiTRAddIndexSQLStorage); err != nil {
+	if cfg.PiTRRepairSQLStorage, err = flags.GetString(FlagPiTRRepairSQLStorage); err != nil {
 		return errors.Trace(err)
 	}
 
@@ -1007,6 +1007,15 @@ func runSnapshotRestore(c context.Context, mgr *conn.Mgr, g glue.Glue, cmdName s
 		}
 	}
 
+	mvPlan, tables, err := newMaterializedViewRestorePlan(tables, checkInfo != nil)
+	if err != nil {
+		return err
+	}
+	files = nil
+	for _, table := range tables {
+		files = append(files, table.Files...)
+	}
+	cfg.snapshotRestoreDataSize = totalBackupFileSize(files)
 	// preallocate the table id, because any ddl job or database creation(include checkpoint) also allocates the global ID
 	idFrom, idEnd, err := client.AllocTableIDs(ctx, tables)
 	if err != nil {
@@ -1259,6 +1268,10 @@ func runSnapshotRestore(c context.Context, mgr *conn.Mgr, g glue.Glue, cmdName s
 
 	// The cost of rename user table / replace into system table wouldn't be so high.
 	// So leave it out of the pipeline for easier implementation.
+	err = mvPlan.restore(ctx, g, mgr.GetDomain(), nil)
+	if err != nil {
+		return errors.Trace(err)
+	}
 	err = client.RestoreSystemSchemas(ctx, cfg.TableFilter)
 	if err != nil {
 		return errors.Trace(err)
@@ -1524,13 +1537,8 @@ func filterRestoreFiles(
 			if table.Info == nil || !cfg.TableFilter.MatchTable(dbName, table.Info.Name.O) {
 				continue
 			}
-			if table.Info.MaterializedView != nil ||
-				table.Info.MaterializedViewLog != nil ||
-				table.Info.MaterializedViewShadow != nil {
+			if skipMaterializedViewRestore(table.Info) {
 				continue
-			}
-			if table.Info.MaterializedViewBase != nil {
-				table.Info.MaterializedViewBase = nil
 			}
 			files = append(files, table.Files...)
 			tables = append(tables, table)
